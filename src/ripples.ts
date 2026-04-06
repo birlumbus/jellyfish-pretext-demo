@@ -44,10 +44,12 @@ export function blockedIntervalsForRippleBands(
   nowMs: number,
   bandTop: number,
   bandBottom: number,
+  /** 1 = default; larger = faster expansion in wall-clock time. */
+  speedScale = 1,
 ): Interval[] {
   const parts: Interval[] = []
   for (const r of ripples) {
-    const age = (nowMs - r.t0) / 1000
+    const age = ((nowMs - r.t0) / 1000) * speedScale
     if (age >= DURATION_S || age < 0) continue
 
     for (let k = 0; k < RINGS; k++) {
@@ -104,8 +106,14 @@ export function pushRipple(
   }
 }
 
-export function removeExpiredRipples(list: Ripple[], nowMs: number): void {
-  const cutoff = nowMs - DURATION_S * 1000
+export function removeExpiredRipples(
+  list: Ripple[],
+  nowMs: number,
+  /** 1 = default; larger = ripples finish sooner in real time. */
+  speedScale = 1,
+): void {
+  const s = Math.max(1e-6, speedScale)
+  const cutoff = nowMs - (DURATION_S * 1000) / s
   for (let i = list.length - 1; i >= 0; i--) {
     if (list[i]!.t0 < cutoff) {
       list.splice(i, 1)
@@ -161,9 +169,14 @@ function strokeWavyRing(
   ctx.stroke()
 }
 
-export function drawRipples(ctx: CanvasRenderingContext2D, list: Ripple[], nowMs: number): void {
+export function drawRipples(
+  ctx: CanvasRenderingContext2D,
+  list: Ripple[],
+  nowMs: number,
+  speedScale = 1,
+): void {
   for (const r of list) {
-    const age = (nowMs - r.t0) / 1000
+    const age = ((nowMs - r.t0) / 1000) * speedScale
     if (age >= DURATION_S || age < 0) continue
 
     const t = age / DURATION_S

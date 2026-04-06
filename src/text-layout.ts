@@ -41,6 +41,8 @@ export function layoutLinesForObstacle(
   rippleLayout?: {
     ripples: readonly Ripple[]
     nowMs: number
+    /** Ripple animation speed (1 = default). Passed to ripple layout. */
+    rippleSpeed?: number
     /** When true (underwater), text ignores the jellyfish; only waves affect layout. */
     omitJellyObstacle?: boolean
     /** Each memory has its own scale (1 = full carve-out, → 0 while receding). */
@@ -68,7 +70,7 @@ export function layoutLinesForObstacle(
       ? []
       : blockedIntervalsForLayout(jelly, bandTop, bandBottom)
     if (rippleLayout !== undefined) {
-      const { ripples, nowMs, waveMemory } = rippleLayout
+      const { ripples, nowMs, waveMemory, rippleSpeed = 1 } = rippleLayout
       if (waveMemory !== undefined && waveMemory.memories.length > 0) {
         for (const m of waveMemory.memories) {
           if (m.scale <= 0) continue
@@ -83,7 +85,7 @@ export function layoutLinesForObstacle(
           blocked = mergeIntervals([...blocked, ...memoryBlocked])
         }
       }
-      const rippleBlocked = blockedIntervalsForRippleBands(ripples, nowMs, bandTop, bandBottom)
+      const rippleBlocked = blockedIntervalsForRippleBands(ripples, nowMs, bandTop, bandBottom, rippleSpeed)
       blocked = mergeIntervals([...blocked, ...rippleBlocked])
     }
     const slots = carveTextLineSlots({ left: baseLeft, right: baseRight }, blocked)

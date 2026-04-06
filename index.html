@@ -6,8 +6,44 @@
     <title>jellyfish-pretext-demo</title>
   </head>
   <body>
-    <canvas id="text-canvas" aria-hidden="true"></canvas>
-    <canvas id="jelly-canvas" aria-hidden="true"></canvas>
+    <header class="site-header">
+      <div class="demo-toolbar" aria-label="Animation speed controls">
+        <div class="toolbar-row">
+          <span class="toolbar-label">Jellyfish speed</span>
+          <input
+            id="jelly-speed"
+            type="range"
+            min="25"
+            max="250"
+            value="100"
+            step="5"
+            aria-valuemin="25"
+            aria-valuemax="250"
+            aria-valuenow="100"
+          />
+          <span class="toolbar-value" id="jelly-speed-val">1.00×</span>
+        </div>
+        <div class="toolbar-row">
+          <span class="toolbar-label">Ripple speed</span>
+          <input
+            id="ripple-speed"
+            type="range"
+            min="25"
+            max="250"
+            value="100"
+            step="5"
+            aria-valuemin="25"
+            aria-valuemax="250"
+            aria-valuenow="100"
+          />
+          <span class="toolbar-value" id="ripple-speed-val">1.00×</span>
+        </div>
+      </div>
+    </header>
+    <div class="stage" id="stage">
+      <canvas id="text-canvas" aria-hidden="true"></canvas>
+      <canvas id="jelly-canvas" aria-hidden="true"></canvas>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

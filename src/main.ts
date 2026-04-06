@@ -52,6 +52,9 @@ function maxRing(r: readonly [number, number, number]): number {
   return Math.max(r[0], r[1], r[2])
 }
 
+const stageRoot = document.getElementById('stage')
+if (stageRoot === null) throw new Error('#stage missing')
+const stageEl: HTMLElement = stageRoot
 const textCanvasEl = document.getElementById('text-canvas')
 const jellyCanvasEl = document.getElementById('jelly-canvas')
 if (!(textCanvasEl instanceof HTMLCanvasElement)) throw new Error('#text-canvas missing')
@@ -72,9 +75,12 @@ let dpr = window.devicePixelRatio || 1
 let width = 0
 let height = 0
 
-let pointerX = innerWidth * 0.5
-let pointerY = innerHeight * 0.45
-const jelly = createJellyfishState(pointerX, pointerY)
+let pointerX = 0
+let pointerY = 0
+
+/** Sliders: 1 = default; jelly scales physics `dt`, ripples scale effective age. */
+let jellySpeedScale = 1
+let rippleSpeedScale = 1
 
 /** Underwater visual mode (dim jelly); text ignores jelly, only waves carve copy. */
 let underwater = false
@@ -116,7 +122,7 @@ function updateDiveWaveImprintFromRipples(clock: number): void {
   if (!underwater || diveWaveImprint === null) return
   for (const r of ripples) {
     if (r.kind !== 'dive') continue
-    const age = (clock - r.t0) / 1000
+    const age = ((clock - r.t0) / 1000) * rippleSpeedScale
     if (age < 0) continue
     for (let k = 0; k < 3; k++) {
       const lr = layoutRadiusForRippleRing(age, k)
@@ -130,7 +136,7 @@ function updateSurfaceTextImprintFromRipples(clock: number): void {
   if (underwater || surfaceTextImprint === null) return
   const r = ripples.find(ripple => ripple.kind === 'surface' && ripple.t0 === surfaceTextImprint!.sessionT0)
   if (r === undefined) return
-  const age = (clock - r.t0) / 1000
+  const age = ((clock - r.t0) / 1000) * rippleSpeedScale
   if (age < 0) return
   for (let k = 0; k < 3; k++) {
     const lr = layoutRadiusForRippleRing(age, k)
@@ -255,7 +261,37 @@ function ripplesForTextLayout(): Ripple[] {
   return ripples.filter(r => !(r.kind === 'surface' && surfaceT0s.has(r.t0)))
 }
 
-addEventListener('click', () => {
+function resize(): void {
+  dpr = window.devicePixelRatio || 1
+  const rect = stageEl.getBoundingClientRect()
+  width = rect.width
+  height = rect.height
+  textCanvas.width = Math.floor(width * dpr)
+  textCanvas.height = Math.floor(height * dpr)
+  textCanvas.style.width = `${width}px`
+  textCanvas.style.height = `${height}px`
+  jellyCanvas.width = Math.floor(width * dpr)
+  jellyCanvas.height = Math.floor(height * dpr)
+  jellyCanvas.style.width = `${width}px`
+  jellyCanvas.style.height = `${height}px`
+  text2d.setTransform(dpr, 0, 0, dpr, 0, 0)
+  jelly2d.setTransform(dpr, 0, 0, dpr, 0, 0)
+}
+
+addEventListener('resize', resize)
+addEventListener('pointermove', e => {
+  const rect = stageEl.getBoundingClientRect()
+  pointerX = e.clientX - rect.left
+  pointerY = e.clientY - rect.top
+})
+
+resize()
+pointerX = width * 0.5
+pointerY = height * 0.45
+const jelly = createJellyfishState(pointerX, pointerY)
+
+addEventListener('click', e => {
+  if (!(e.target instanceof Node) || !stageEl.contains(e.target)) return
   const { cx, cy } = layoutObstacleFromState(jelly)
   const clock = performance.now()
 
@@ -306,29 +342,27 @@ addEventListener('click', () => {
   }
 })
 
-function resize(): void {
-  dpr = window.devicePixelRatio || 1
-  width = innerWidth
-  height = innerHeight
-  textCanvas.width = Math.floor(width * dpr)
-  textCanvas.height = Math.floor(height * dpr)
-  textCanvas.style.width = `${width}px`
-  textCanvas.style.height = `${height}px`
-  jellyCanvas.width = Math.floor(width * dpr)
-  jellyCanvas.height = Math.floor(height * dpr)
-  jellyCanvas.style.width = `${width}px`
-  jellyCanvas.style.height = `${height}px`
-  text2d.setTransform(dpr, 0, 0, dpr, 0, 0)
-  jelly2d.setTransform(dpr, 0, 0, dpr, 0, 0)
+function bindSpeedSliders(): void {
+  const jellyEl = document.getElementById('jelly-speed')
+  const jellyLabel = document.getElementById('jelly-speed-val')
+  const rippleEl = document.getElementById('ripple-speed')
+  const rippleLabel = document.getElementById('ripple-speed-val')
+  if (!(jellyEl instanceof HTMLInputElement) || !(jellyLabel instanceof HTMLElement)) return
+  if (!(rippleEl instanceof HTMLInputElement) || !(rippleLabel instanceof HTMLElement)) return
+
+  const apply = (): void => {
+    jellySpeedScale = Number(jellyEl.value) / 100
+    rippleSpeedScale = Number(rippleEl.value) / 100
+    jellyLabel.textContent = `${jellySpeedScale.toFixed(2)}×`
+    rippleLabel.textContent = `${rippleSpeedScale.toFixed(2)}×`
+    jellyEl.setAttribute('aria-valuenow', jellyEl.value)
+    rippleEl.setAttribute('aria-valuenow', rippleEl.value)
+  }
+  jellyEl.addEventListener('input', apply)
+  rippleEl.addEventListener('input', apply)
+  apply()
 }
-
-addEventListener('resize', resize)
-addEventListener('pointermove', e => {
-  pointerX = e.clientX
-  pointerY = e.clientY
-})
-
-resize()
+bindSpeedSliders()
 
 let last = performance.now()
 function frame(now: number): void {
@@ -337,12 +371,12 @@ function frame(now: number): void {
 
   const clock = performance.now()
 
-  stepJellyfish(jelly, pointerX, pointerY, dt)
+  stepJellyfish(jelly, pointerX, pointerY, dt * jellySpeedScale)
 
   updateDiveWaveImprintFromRipples(clock)
   updateSurfaceTextImprintFromRipples(clock)
 
-  removeExpiredRipples(ripples, clock)
+  removeExpiredRipples(ripples, clock, rippleSpeedScale)
 
   transitionWaveTextAfterRipplesRemoved(clock)
 
@@ -354,6 +388,7 @@ function frame(now: number): void {
   const lines = layoutLinesForObstacle(prepared, width, height, MARGIN, LINE_HEIGHT, jelly, {
     ripples: ripplesForTextLayout(),
     nowMs: clock,
+    rippleSpeed: rippleSpeedScale,
     omitJellyObstacle: underwater,
     waveMemory,
   })
@@ -361,7 +396,7 @@ function frame(now: number): void {
   text2d.fillStyle = '#0a1628'
   text2d.fillRect(0, 0, width, height)
 
-  drawRipples(text2d, ripples, clock)
+  drawRipples(text2d, ripples, clock, rippleSpeedScale)
 
   drawLines(text2d, lines)
 
