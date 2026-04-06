@@ -7,18 +7,15 @@ export type Ripple = {
   y: number
   t0: number
   kind: RippleKind
-  /** Per-event angle offset so successive ripples don’t look identical. */
   rot0: number
 }
 
 const DURATION_S = 1.55
-/** Outer travel distance (px) for the leading wave. */
 const RIPPLE_MAX_R = 168
-/** Three wave fronts, each delayed so they read as separate rings moving out. */
 const RINGS = 3
 const RING_STAGGER_S = 0.22
 const SEGMENTS = 96
-/** Extra radius for text carve-out so copy clears the wavy stroke (layout uses smooth circles). */
+/** Padding so text layout clears the painted wavy ring (layout uses smooth circles). */
 const RIPPLE_LAYOUT_PAD = 18
 
 /** Layout radius (base + pad) for a ring at this age, or null if the ring has not started. */
@@ -36,9 +33,6 @@ export function ringBaseRadiusForRipple(ageSeconds: number, ringIndex: number): 
   return Math.max(5, ringT * RIPPLE_MAX_R * (1 + ringIndex * 0.07))
 }
 
-/**
- * Horizontal blocked intervals for one text line band: expanding ripple rings as smooth circles.
- */
 export function blockedIntervalsForRippleBands(
   ripples: readonly Ripple[],
   nowMs: number,
@@ -62,9 +56,6 @@ export function blockedIntervalsForRippleBands(
   return mergeIntervals(parts)
 }
 
-/**
- * Blocked intervals from stored max ring radii (layout px), scaled for recede animation.
- */
 export function blockedIntervalsForWaveMemory(
   cx: number,
   cy: number,
@@ -84,9 +75,6 @@ export function blockedIntervalsForWaveMemory(
   return mergeIntervals(parts)
 }
 
-/**
- * Append a ripple and drop the oldest if more than `maxActive` should be playing.
- */
 export function pushRipple(
   list: Ripple[],
   x: number,

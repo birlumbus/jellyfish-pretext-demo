@@ -94,8 +94,6 @@ export function layoutLinesForObstacle(
       continue
     }
 
-    // Left-to-right so text wraps around the obstacle: both sides of the circle
-    // get content on the same baseline (not only the widest column).
     slots.sort((a, b) => a.left - b.left)
 
     if (slots.length === 1) {

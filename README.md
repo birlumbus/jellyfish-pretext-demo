@@ -27,4 +27,4 @@ Upload the `dist/` output or use a GitHub Action that runs `vite build` and publ
 
 ## Reference
 
-An optional local clone of [`chenglou/pretext`](https://github.com/chenglou/pretext) can be kept for API reference; this app depends on the published npm package.
+API details: [`chenglou/pretext`](https://github.com/chenglou/pretext) on GitHub; this project uses the npm package only.

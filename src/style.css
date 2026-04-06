@@ -4,9 +4,7 @@
 
 :root {
   color-scheme: light;
-  --page: #f5f1ea;
   --panel: #fffdf8;
-  --ink: #201b18;
   --muted: #6d645d;
   --rule: #d8cec3;
   --accent: #955f3b;
@@ -29,7 +27,6 @@ body {
   min-height: 100%;
 }
 
-/* Full-width header: Pretext demo–style controls (rich-note / bubbles) */
 .site-header {
   flex-shrink: 0;
   width: 100%;

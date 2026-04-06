@@ -1,3 +1,7 @@
+/**
+ * Entry: two canvases (text + ripples below, jellyfish above). Pointer drives the jelly;
+ * clicks alternate dive/surface mode and coordinate ripple + text carve-out state.
+ */
 import './style.css'
 import {
   createJellyfishState,
@@ -13,24 +17,17 @@ import {
   layoutLinesForObstacle,
 } from './text-layout'
 
-/**
- * After the visual ripple finishes expanding, wait this long before text carve-out *starts* receding
- * (at ripple speed 1×; scaled by `msScaledByRippleSpeed` for other speeds).
- */
+/** Delay after the ripple animation ends before the carved text band begins to fade (scaled by ripple speed). */
 const WAVE_TEXT_POST_RIPPLE_DELAY_MS = 250
-/**
- * Duration of the recede animation alone (does **not** include the post-ripple delay above), at ripple speed 1×.
- * Easing is ease-in-out so motion is spread across the full window (ease-out-only felt much faster).
- */
+/** Duration of the text carve-out fade (scaled by ripple speed); uses ease-in-out. */
 const WAVE_TEXT_RECEDE_DURATION_MS = 2400
 
-/** Wall-clock ms for a “ripple-time” duration: faster ripples shorten wait + recede to match. */
 function msScaledByRippleSpeed(baseMs: number): number {
   return baseMs / Math.max(1e-6, rippleSpeedScale)
 }
 
-/** Max completed wave-text recede animations at once (3rd overlapping cycle drops the oldest). */
-const MAX_WAVE_TEXT_RECDE_SLOTS = 2
+/** How many post-ripple fade animations to keep; older ones drop if the user clicks quickly. */
+const MAX_WAVE_TEXT_RECEDE_SLOTS = 2
 
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
@@ -46,7 +43,7 @@ type WaitRecedeState = {
   tRecedeEnd: number
 }
 
-/** `sessionT0` when this recede came from a surface ripple (for live-band exclusion). */
+/** `sessionT0` links a surface ripple to its carve-out when excluding duplicate layout blocks. */
 type TrackedRecede = WaitRecedeState & { sessionT0?: number }
 
 function scaleFromWaitRecede(s: WaitRecedeState, clock: number): number {
@@ -70,11 +67,11 @@ if (!(jellyCanvasEl instanceof HTMLCanvasElement)) throw new Error('#jelly-canva
 const textCanvas = textCanvasEl
 const jellyCanvas = jellyCanvasEl
 
-const textCtx = textCanvas.getContext('2d')
-const jellyCtx = jellyCanvas.getContext('2d')
-if (textCtx === null || jellyCtx === null) throw new Error('2d context unavailable')
-const text2d = textCtx
-const jelly2d = jellyCtx
+const textCtxRaw = textCanvas.getContext('2d')
+const jellyCtxRaw = jellyCanvas.getContext('2d')
+if (textCtxRaw === null || jellyCtxRaw === null) throw new Error('2d context unavailable')
+const textCtx: CanvasRenderingContext2D = textCtxRaw
+const jellyCtx: CanvasRenderingContext2D = jellyCtxRaw
 
 const LINE_HEIGHT = 30
 const MARGIN = 28
@@ -110,16 +107,12 @@ type SurfaceTextImprint = {
 }
 let surfaceTextImprint: SurfaceTextImprint | null = null
 
-/**
- * FIFO queue of wait/recede phases after a ripple’s visual ends. Capped so a 3rd quick cycle
- * drops the oldest; new clicks do not clear in-progress recedes.
- */
-let waveTextRedeces: TrackedRecede[] = []
+let waveTextRecedes: TrackedRecede[] = []
 
 function pushWaveTextRecede(item: TrackedRecede): void {
-  waveTextRedeces.push(item)
-  while (waveTextRedeces.length > MAX_WAVE_TEXT_RECDE_SLOTS) {
-    waveTextRedeces.shift()
+  waveTextRecedes.push(item)
+  while (waveTextRecedes.length > MAX_WAVE_TEXT_RECEDE_SLOTS) {
+    waveTextRecedes.shift()
   }
 }
 
@@ -175,7 +168,7 @@ function advanceTrackedRecede(clock: number, s: TrackedRecede): TrackedRecede | 
   return { ...next, sessionT0: s.sessionT0 }
 }
 
-/** After ripples are culled: start auto-recede timers when animated ripples are gone. */
+/** When a ripple expires, hand off its carve-out to the wait/recede queue if needed. */
 function transitionWaveTextAfterRipplesRemoved(clock: number): void {
   if (underwater && diveWaveImprint !== null) {
     const hasDiveRipple = ripples.some(r => r.kind === 'dive')
@@ -219,7 +212,7 @@ type WaveMemoryPayload = {
 function computeWaveMemory(clock: number): WaveMemoryPayload | undefined {
   const memories: WaveMemoryPayload['memories'] = []
 
-  for (const tr of waveTextRedeces) {
+  for (const tr of waveTextRecedes) {
     const sc = scaleFromWaitRecede(tr, clock)
     if (sc > 0) {
       memories.push({
@@ -252,15 +245,13 @@ function computeWaveMemory(clock: number): WaveMemoryPayload | undefined {
   return memories.length > 0 ? { memories } : undefined
 }
 
-/**
- * Omit surface ripples whose carve-out is tracked in memory (active imprint or matching recede slot).
- */
+/** Surface ripples already represented by imprints or recede slots are omitted to avoid double-blocking. */
 function ripplesForTextLayout(): Ripple[] {
   const surfaceT0s = new Set<number>()
   if (surfaceTextImprint !== null) {
     surfaceT0s.add(surfaceTextImprint.sessionT0)
   }
-  for (const tr of waveTextRedeces) {
+  for (const tr of waveTextRecedes) {
     if (tr.sessionT0 !== undefined) {
       surfaceT0s.add(tr.sessionT0)
     }
@@ -282,8 +273,8 @@ function resize(): void {
   jellyCanvas.height = Math.floor(height * dpr)
   jellyCanvas.style.width = `${width}px`
   jellyCanvas.style.height = `${height}px`
-  text2d.setTransform(dpr, 0, 0, dpr, 0, 0)
-  jelly2d.setTransform(dpr, 0, 0, dpr, 0, 0)
+  textCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  jellyCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
 }
 
 addEventListener('resize', resize)
@@ -388,7 +379,7 @@ function frame(now: number): void {
 
   transitionWaveTextAfterRipplesRemoved(clock)
 
-  waveTextRedeces = waveTextRedeces.map(tr => advanceTrackedRecede(clock, tr)).filter((tr): tr is TrackedRecede => tr !== null)
+  waveTextRecedes = waveTextRecedes.map(tr => advanceTrackedRecede(clock, tr)).filter((tr): tr is TrackedRecede => tr !== null)
 
   const waveMemory = computeWaveMemory(clock)
 
@@ -401,15 +392,15 @@ function frame(now: number): void {
     waveMemory,
   })
 
-  text2d.fillStyle = '#0a1628'
-  text2d.fillRect(0, 0, width, height)
+  textCtx.fillStyle = '#0a1628'
+  textCtx.fillRect(0, 0, width, height)
 
-  drawRipples(text2d, ripples, clock, rippleSpeedScale)
+  drawRipples(textCtx, ripples, clock, rippleSpeedScale)
 
-  drawLines(text2d, lines)
+  drawLines(textCtx, lines)
 
-  jelly2d.clearRect(0, 0, width, height)
-  drawJellyfish(jelly2d, jelly, { underwater })
+  jellyCtx.clearRect(0, 0, width, height)
+  drawJellyfish(jellyCtx, jelly, { underwater })
 
   requestAnimationFrame(frame)
 }

@@ -18,9 +18,6 @@ const FROND_UNDERLAP = 4
 /** Keep frond anchors off the rim endpoints so end fronds sit under the dome, not past pL/pR. */
 const RIM_U_INSET = 0.09
 
-/** Subtle rim variation (0 = straight rim for a clean semicircle). */
-const SCALLOP_AMP = 0
-
 /** Damped spring: stiffness (1/s² scale) and damping coefficient (1/s). */
 const FROND_STIFFNESS = 42
 const FROND_DAMPING = 14
@@ -95,17 +92,16 @@ function bellBasis(apexX: number, apexY: number, baseX: number, baseY: number) {
 function rimPointWorld(
   baseX: number,
   baseY: number,
-  ux: number,
-  uy: number,
+  _ux: number,
+  _uy: number,
   vx: number,
   vy: number,
   uParam: number,
 ): { x: number; y: number } {
   const lx = -BELL_RX + 2 * BELL_RX * uParam
-  const sc = SCALLOP_AMP * Math.sin(uParam * Math.PI * 2.08 + 0.18)
   return {
-    x: baseX + vx * lx + ux * sc,
-    y: baseY + vy * lx + uy * sc,
+    x: baseX + vx * lx,
+    y: baseY + vy * lx,
   }
 }
 
@@ -184,13 +180,6 @@ function frondAttach(
     y: p.y + n.y * FROND_UNDERLAP,
     rimTx: t.x,
     rimTy: t.y,
-  }
-}
-
-export function cloneJellyfishState(state: JellyfishState): JellyfishState {
-  return {
-    ...state,
-    fronds: state.fronds.map(f => ({ ...f })),
   }
 }
 
@@ -555,7 +544,6 @@ function appendJellyfishOutlinePath(
     )
   }
 
-  // Any null (e.g. frond length < 4 when compressed) breaks the chain; prev can be null in the loop.
   if (n === 0 || polys.some(p => p === null)) {
     ctx.moveTo(pL.x, pL.y)
     ctx.arc(mx, my, r, angL, angR, anticlockwise)

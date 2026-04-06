@@ -23,10 +23,7 @@ export function circleBlockedIntervalForBand(
   return { left: cx - halfW, right: cx + halfW }
 }
 
-/**
- * Carve one full-width interval by blocked intervals; drop unusably narrow slivers.
- * Vendored from pretext demo wrap-geometry (same semantics).
- */
+/** Subtract blocked intervals from a full-width band; drop slivers narrower than the minimum line width. */
 export function carveTextLineSlots(base: Interval, blocked: Interval[]): Interval[] {
   let slots: Interval[] = [base]
 
@@ -65,16 +62,4 @@ export function mergeIntervals(intervals: Interval[]): Interval[] {
   }
   out.push(cur)
   return out
-}
-
-export function pickWidestSlot(slots: Interval[]): Interval | null {
-  if (slots.length === 0) return null
-  let best = slots[0]!
-  for (let i = 1; i < slots.length; i++) {
-    const s = slots[i]!
-    const bw = best.right - best.left
-    const sw = s.right - s.left
-    if (sw > bw) best = s
-  }
-  return best
 }
