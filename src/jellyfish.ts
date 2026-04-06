@@ -9,6 +9,8 @@ export const BODY_RADIUS_LAYOUT = 58
 const FROND_LAYOUT_PAD_X = 7
 
 const FROND_LENGTH = 48
+/** Hard cap on |tip − anchor| so faster body motion does not stretch fronds beyond prior range. */
+const FROND_MAX_ANCHOR_DIST = FROND_LENGTH + 18
 const FROND_TOP_W = 8
 const FROND_BOT_W = 15
 const FROND_COUNT = 6
@@ -30,16 +32,16 @@ const BODY_MOTION_INFLUENCE = 0.08
 const BELL_REST_LENGTH = 68
 
 /** Time constant (seconds) for low-pass cursor — smaller = tighter follow. */
-const SMOOTH_CURSOR_TAU = 0.055
+const SMOOTH_CURSOR_TAU = 0.028
 
 /** Cursor attraction on the apex (after smoothing). */
-const K_ATTRACT = 52
-const DRAG_LINEAR = 16
-const DRAG_QUAD = 0.02
+const K_ATTRACT = 86
+const DRAG_LINEAR = 18
+const DRAG_QUAD = 0.024
 const MAX_SPEED_APEX = 340
 
 /** Base follows apex through the “water”. */
-const K_BASE = 38
+const K_BASE = 50
 const BASE_DRAG_LINEAR = 13
 const BASE_DRAG_QUAD = 0.015
 const MAX_SPEED_BASE = 260
@@ -182,6 +184,13 @@ function frondAttach(
     y: p.y + n.y * FROND_UNDERLAP,
     rimTx: t.x,
     rimTy: t.y,
+  }
+}
+
+export function cloneJellyfishState(state: JellyfishState): JellyfishState {
+  return {
+    ...state,
+    fronds: state.fronds.map(f => ({ ...f })),
   }
 }
 
@@ -333,6 +342,22 @@ export function stepJellyfish(
     f.vy += aySpring * dt
     f.tipX += f.vx * dt
     f.tipY += f.vy * dt
+
+    const fdx = f.tipX - anchor.x
+    const fdy = f.tipY - anchor.y
+    const fdist = Math.hypot(fdx, fdy)
+    if (fdist > FROND_MAX_ANCHOR_DIST && fdist > 1e-6) {
+      const s = FROND_MAX_ANCHOR_DIST / fdist
+      f.tipX = anchor.x + fdx * s
+      f.tipY = anchor.y + fdy * s
+      const nx = fdx / fdist
+      const ny = fdy / fdist
+      const vrad = f.vx * nx + f.vy * ny
+      if (vrad > 0) {
+        f.vx -= nx * vrad
+        f.vy -= ny * vrad
+      }
+    }
   }
 }
 
@@ -557,12 +582,20 @@ function appendJellyfishOutlinePath(
   ctx.quadraticCurveTo(p0.midLx, p0.midLy, p0.tl.x, p0.tl.y)
 }
 
-export function drawJellyfish(ctx: CanvasRenderingContext2D, state: JellyfishState): void {
+export function drawJellyfish(
+  ctx: CanvasRenderingContext2D,
+  state: JellyfishState,
+  options?: { underwater?: boolean },
+): void {
   const { ux, uy, vx, vy } = bellBasis(state.apexX, state.apexY, state.x, state.y)
   const downX = -ux
   const downY = -uy
 
   ctx.save()
+  if (options?.underwater) {
+    ctx.filter = 'brightness(0.52) saturate(0.72) contrast(0.95)'
+    ctx.globalAlpha = 0.9
+  }
 
   for (let i = 0; i < state.fronds.length; i++) {
     const f = state.fronds[i]!

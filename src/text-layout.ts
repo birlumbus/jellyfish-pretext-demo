@@ -6,7 +6,12 @@ import {
 } from '@chenglou/pretext'
 import { BODY_COPY } from './copy'
 import { blockedIntervalsForLayout, type JellyfishState } from './jellyfish'
-import { carveTextLineSlots } from './intervals'
+import {
+  blockedIntervalsForRippleBands,
+  blockedIntervalsForWaveMemory,
+  type Ripple,
+} from './ripples'
+import { carveTextLineSlots, mergeIntervals, type Interval } from './intervals'
 
 export const BODY_FONT =
   '400 19px "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif'
@@ -33,6 +38,21 @@ export function layoutLinesForObstacle(
   margin: number,
   lineHeight: number,
   jelly: JellyfishState,
+  rippleLayout?: {
+    ripples: readonly Ripple[]
+    nowMs: number
+    /** When true (underwater), text ignores the jellyfish; only waves affect layout. */
+    omitJellyObstacle?: boolean
+    /** Each memory has its own scale (1 = full carve-out, → 0 while receding). */
+    waveMemory?: {
+      memories: {
+        cx: number
+        cy: number
+        ringLayoutR: readonly [number, number, number]
+        scale: number
+      }[]
+    }
+  },
 ): LaidOutLine[] {
   const lines: LaidOutLine[] = []
   let cursor: LayoutCursor = { segmentIndex: 0, graphemeIndex: 0 }
@@ -44,7 +64,28 @@ export function layoutLinesForObstacle(
     const bandTop = lineTop
     const bandBottom = lineTop + lineHeight
 
-    const blocked = blockedIntervalsForLayout(jelly, bandTop, bandBottom)
+    let blocked: Interval[] = rippleLayout?.omitJellyObstacle
+      ? []
+      : blockedIntervalsForLayout(jelly, bandTop, bandBottom)
+    if (rippleLayout !== undefined) {
+      const { ripples, nowMs, waveMemory } = rippleLayout
+      if (waveMemory !== undefined && waveMemory.memories.length > 0) {
+        for (const m of waveMemory.memories) {
+          if (m.scale <= 0) continue
+          const memoryBlocked = blockedIntervalsForWaveMemory(
+            m.cx,
+            m.cy,
+            m.ringLayoutR,
+            m.scale,
+            bandTop,
+            bandBottom,
+          )
+          blocked = mergeIntervals([...blocked, ...memoryBlocked])
+        }
+      }
+      const rippleBlocked = blockedIntervalsForRippleBands(ripples, nowMs, bandTop, bandBottom)
+      blocked = mergeIntervals([...blocked, ...rippleBlocked])
+    }
     const slots = carveTextLineSlots({ left: baseLeft, right: baseRight }, blocked)
     if (slots.length === 0) {
       lineTop += lineHeight
