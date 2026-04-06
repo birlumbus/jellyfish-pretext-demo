@@ -21,6 +21,9 @@ const WAVE_TEXT_POST_RIPPLE_DELAY_MS = 250
  */
 const WAVE_TEXT_RECEDE_DURATION_MS = 2400
 
+/** Max completed wave-text recede animations at once (3rd overlapping cycle drops the oldest). */
+const MAX_WAVE_TEXT_RECDE_SLOTS = 2
+
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
 }
@@ -34,6 +37,9 @@ type WaitRecedeState = {
   tRecedeStart: number
   tRecedeEnd: number
 }
+
+/** `sessionT0` when this recede came from a surface ripple (for live-band exclusion). */
+type TrackedRecede = WaitRecedeState & { sessionT0?: number }
 
 function scaleFromWaitRecede(s: WaitRecedeState, clock: number): number {
   if (s.phase === 'wait') return 1
@@ -81,9 +87,6 @@ type DiveWaveImprint = {
 }
 let diveWaveImprint: DiveWaveImprint | null = null
 
-/** After the dive ripple ends: hold full carve-out, then recede (still underwater). */
-let underwaterWaveTextRecede: WaitRecedeState | null = null
-
 /** While the surface ripple is animating — max radii (surfaced). */
 type SurfaceTextImprint = {
   cx: number
@@ -93,8 +96,18 @@ type SurfaceTextImprint = {
 }
 let surfaceTextImprint: SurfaceTextImprint | null = null
 
-/** After surface ripple ends: hold, then recede. */
-let surfaceWaveTextRecede: (WaitRecedeState & { sessionT0: number }) | null = null
+/**
+ * FIFO queue of wait/recede phases after a ripple’s visual ends. Capped so a 3rd quick cycle
+ * drops the oldest; new clicks do not clear in-progress recedes.
+ */
+let waveTextRedeces: TrackedRecede[] = []
+
+function pushWaveTextRecede(item: TrackedRecede): void {
+  waveTextRedeces.push(item)
+  while (waveTextRedeces.length > MAX_WAVE_TEXT_RECDE_SLOTS) {
+    waveTextRedeces.shift()
+  }
+}
 
 const ripples: Ripple[] = []
 const MAX_RIPPLES = 2
@@ -142,12 +155,18 @@ function advanceWaitRecedeState(clock: number, state: WaitRecedeState | null): W
   return state
 }
 
+function advanceTrackedRecede(clock: number, s: TrackedRecede): TrackedRecede | null {
+  const next = advanceWaitRecedeState(clock, s)
+  if (next === null) return null
+  return { ...next, sessionT0: s.sessionT0 }
+}
+
 /** After ripples are culled: start auto-recede timers when animated ripples are gone. */
 function transitionWaveTextAfterRipplesRemoved(clock: number): void {
-  if (underwater && diveWaveImprint !== null && underwaterWaveTextRecede === null) {
+  if (underwater && diveWaveImprint !== null) {
     const hasDiveRipple = ripples.some(r => r.kind === 'dive')
     if (!hasDiveRipple && maxRing(diveWaveImprint.ringLayoutR) > 0) {
-      underwaterWaveTextRecede = {
+      pushWaveTextRecede({
         cx: diveWaveImprint.x,
         cy: diveWaveImprint.y,
         ringLayoutR: [...diveWaveImprint.ringLayoutR] as [number, number, number],
@@ -155,16 +174,16 @@ function transitionWaveTextAfterRipplesRemoved(clock: number): void {
         tWaitEnd: clock + WAVE_TEXT_POST_RIPPLE_DELAY_MS,
         tRecedeStart: 0,
         tRecedeEnd: 0,
-      }
+      })
       diveWaveImprint = null
     }
   }
 
-  if (!underwater && surfaceTextImprint !== null && surfaceWaveTextRecede === null) {
+  if (!underwater && surfaceTextImprint !== null) {
     const t0 = surfaceTextImprint.sessionT0
     const hasSurfaceRipple = ripples.some(r => r.kind === 'surface' && r.t0 === t0)
     if (!hasSurfaceRipple && maxRing(surfaceTextImprint.ringLayoutR) > 0) {
-      surfaceWaveTextRecede = {
+      pushWaveTextRecede({
         cx: surfaceTextImprint.cx,
         cy: surfaceTextImprint.cy,
         ringLayoutR: [...surfaceTextImprint.ringLayoutR] as [number, number, number],
@@ -173,7 +192,7 @@ function transitionWaveTextAfterRipplesRemoved(clock: number): void {
         tRecedeStart: 0,
         tRecedeEnd: 0,
         sessionT0: t0,
-      }
+      })
       surfaceTextImprint = null
     }
   }
@@ -186,78 +205,97 @@ type WaveMemoryPayload = {
 function computeWaveMemory(clock: number): WaveMemoryPayload | undefined {
   const memories: WaveMemoryPayload['memories'] = []
 
-  if (underwater) {
-    if (diveWaveImprint !== null) {
+  for (const tr of waveTextRedeces) {
+    const sc = scaleFromWaitRecede(tr, clock)
+    if (sc > 0) {
       memories.push({
-        cx: diveWaveImprint.x,
-        cy: diveWaveImprint.y,
-        ringLayoutR: diveWaveImprint.ringLayoutR,
-        scale: 1,
+        cx: tr.cx,
+        cy: tr.cy,
+        ringLayoutR: tr.ringLayoutR,
+        scale: sc,
       })
     }
-    if (underwaterWaveTextRecede !== null) {
-      const sc = scaleFromWaitRecede(underwaterWaveTextRecede, clock)
-      if (sc > 0) {
-        memories.push({
-          cx: underwaterWaveTextRecede.cx,
-          cy: underwaterWaveTextRecede.cy,
-          ringLayoutR: underwaterWaveTextRecede.ringLayoutR,
-          scale: sc,
-        })
-      }
-    }
-  } else {
-    if (surfaceTextImprint !== null) {
-      memories.push({
-        cx: surfaceTextImprint.cx,
-        cy: surfaceTextImprint.cy,
-        ringLayoutR: surfaceTextImprint.ringLayoutR,
-        scale: 1,
-      })
-    }
-    if (surfaceWaveTextRecede !== null) {
-      const { sessionT0: _s, ...recede } = surfaceWaveTextRecede
-      const sc = scaleFromWaitRecede(recede, clock)
-      if (sc > 0) {
-        memories.push({
-          cx: recede.cx,
-          cy: recede.cy,
-          ringLayoutR: recede.ringLayoutR,
-          scale: sc,
-        })
-      }
-    }
+  }
+
+  if (underwater && diveWaveImprint !== null) {
+    memories.push({
+      cx: diveWaveImprint.x,
+      cy: diveWaveImprint.y,
+      ringLayoutR: diveWaveImprint.ringLayoutR,
+      scale: 1,
+    })
+  }
+
+  if (!underwater && surfaceTextImprint !== null) {
+    memories.push({
+      cx: surfaceTextImprint.cx,
+      cy: surfaceTextImprint.cy,
+      ringLayoutR: surfaceTextImprint.ringLayoutR,
+      scale: 1,
+    })
   }
 
   return memories.length > 0 ? { memories } : undefined
 }
 
 /**
- * Omit the active surface ripple from live bands — its carve-out is tracked in memory so text
- * reaches full apex and recedes smoothly (not tied to ripple list lifetime).
+ * Omit surface ripples whose carve-out is tracked in memory (active imprint or matching recede slot).
  */
 function ripplesForTextLayout(): Ripple[] {
-  const surfaceT0 = surfaceTextImprint?.sessionT0 ?? surfaceWaveTextRecede?.sessionT0
-  if (surfaceT0 === undefined) return ripples
-  return ripples.filter(r => !(r.kind === 'surface' && r.t0 === surfaceT0))
+  const surfaceT0s = new Set<number>()
+  if (surfaceTextImprint !== null) {
+    surfaceT0s.add(surfaceTextImprint.sessionT0)
+  }
+  for (const tr of waveTextRedeces) {
+    if (tr.sessionT0 !== undefined) {
+      surfaceT0s.add(tr.sessionT0)
+    }
+  }
+  if (surfaceT0s.size === 0) return ripples
+  return ripples.filter(r => !(r.kind === 'surface' && surfaceT0s.has(r.t0)))
 }
 
 addEventListener('click', () => {
   const { cx, cy } = layoutObstacleFromState(jelly)
   const clock = performance.now()
+
   if (!underwater) {
+    if (surfaceTextImprint !== null && maxRing(surfaceTextImprint.ringLayoutR) > 0) {
+      pushWaveTextRecede({
+        cx: surfaceTextImprint.cx,
+        cy: surfaceTextImprint.cy,
+        ringLayoutR: [...surfaceTextImprint.ringLayoutR] as [number, number, number],
+        phase: 'wait',
+        tWaitEnd: clock + WAVE_TEXT_POST_RIPPLE_DELAY_MS,
+        tRecedeStart: 0,
+        tRecedeEnd: 0,
+        sessionT0: surfaceTextImprint.sessionT0,
+      })
+    }
+    surfaceTextImprint = null
+
     pushRipple(ripples, cx, cy, 'dive', MAX_RIPPLES)
     underwater = true
     diveWaveImprint = { x: cx, y: cy, ringLayoutR: [0, 0, 0] }
-    underwaterWaveTextRecede = null
   } else {
+    if (diveWaveImprint !== null && maxRing(diveWaveImprint.ringLayoutR) > 0) {
+      pushWaveTextRecede({
+        cx: diveWaveImprint.x,
+        cy: diveWaveImprint.y,
+        ringLayoutR: [...diveWaveImprint.ringLayoutR] as [number, number, number],
+        phase: 'wait',
+        tWaitEnd: clock + WAVE_TEXT_POST_RIPPLE_DELAY_MS,
+        tRecedeStart: 0,
+        tRecedeEnd: 0,
+      })
+    }
+    diveWaveImprint = null
+
     pushRipple(ripples, cx, cy, 'surface', MAX_RIPPLES)
     const last = ripples[ripples.length - 1]
     const surfaceT0 = last !== undefined ? last.t0 : clock
 
     underwater = false
-    diveWaveImprint = null
-    underwaterWaveTextRecede = null
 
     surfaceTextImprint = {
       cx,
@@ -265,7 +303,6 @@ addEventListener('click', () => {
       ringLayoutR: [0, 0, 0],
       sessionT0: surfaceT0,
     }
-    surfaceWaveTextRecede = null
   }
 })
 
@@ -309,13 +346,7 @@ function frame(now: number): void {
 
   transitionWaveTextAfterRipplesRemoved(clock)
 
-  underwaterWaveTextRecede = advanceWaitRecedeState(clock, underwaterWaveTextRecede)
-  if (surfaceWaveTextRecede !== null) {
-    const { sessionT0, ...rest } = surfaceWaveTextRecede
-    const next = advanceWaitRecedeState(clock, rest)
-    surfaceWaveTextRecede =
-      next === null ? null : ({ ...next, sessionT0 } as typeof surfaceWaveTextRecede)
-  }
+  waveTextRedeces = waveTextRedeces.map(tr => advanceTrackedRecede(clock, tr)).filter((tr): tr is TrackedRecede => tr !== null)
 
   const waveMemory = computeWaveMemory(clock)
 
