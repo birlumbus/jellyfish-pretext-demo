@@ -81,8 +81,9 @@ body {
   background: #0a1628;
 }
 
-#text-canvas,
-#jelly-canvas {
+#bg-canvas,
+#jelly-canvas,
+#text-canvas {
   position: absolute;
   left: 0;
   top: 0;
@@ -91,11 +92,16 @@ body {
   display: block;
 }
 
-#text-canvas {
+#bg-canvas {
   z-index: 0;
 }
 
 #jelly-canvas {
   z-index: 1;
+  pointer-events: none;
+}
+
+#text-canvas {
+  z-index: 2;
   pointer-events: none;
 }

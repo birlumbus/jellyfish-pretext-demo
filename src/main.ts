@@ -1,5 +1,5 @@
 /**
- * Entry: two canvases (text + ripples below, jellyfish above). Pointer drives the jelly;
+ * Entry: three canvases (background + ripples, jellyfish, text on top). Pointer drives the jelly;
  * clicks alternate dive/surface mode and coordinate ripple + text carve-out state.
  */
 import './style.css'
@@ -60,16 +60,21 @@ function maxRing(r: readonly [number, number, number]): number {
 const stageRoot = document.getElementById('stage')
 if (stageRoot === null) throw new Error('#stage missing')
 const stageEl: HTMLElement = stageRoot
+const bgCanvasEl = document.getElementById('bg-canvas')
 const textCanvasEl = document.getElementById('text-canvas')
 const jellyCanvasEl = document.getElementById('jelly-canvas')
+if (!(bgCanvasEl instanceof HTMLCanvasElement)) throw new Error('#bg-canvas missing')
 if (!(textCanvasEl instanceof HTMLCanvasElement)) throw new Error('#text-canvas missing')
 if (!(jellyCanvasEl instanceof HTMLCanvasElement)) throw new Error('#jelly-canvas missing')
+const bgCanvas = bgCanvasEl
 const textCanvas = textCanvasEl
 const jellyCanvas = jellyCanvasEl
 
+const bgCtxRaw = bgCanvas.getContext('2d')
 const textCtxRaw = textCanvas.getContext('2d')
 const jellyCtxRaw = jellyCanvas.getContext('2d')
-if (textCtxRaw === null || jellyCtxRaw === null) throw new Error('2d context unavailable')
+if (bgCtxRaw === null || textCtxRaw === null || jellyCtxRaw === null) throw new Error('2d context unavailable')
+const bgCtx: CanvasRenderingContext2D = bgCtxRaw
 const textCtx: CanvasRenderingContext2D = textCtxRaw
 const jellyCtx: CanvasRenderingContext2D = jellyCtxRaw
 
@@ -265,14 +270,13 @@ function resize(): void {
   const rect = stageEl.getBoundingClientRect()
   width = rect.width
   height = rect.height
-  textCanvas.width = Math.floor(width * dpr)
-  textCanvas.height = Math.floor(height * dpr)
-  textCanvas.style.width = `${width}px`
-  textCanvas.style.height = `${height}px`
-  jellyCanvas.width = Math.floor(width * dpr)
-  jellyCanvas.height = Math.floor(height * dpr)
-  jellyCanvas.style.width = `${width}px`
-  jellyCanvas.style.height = `${height}px`
+  for (const c of [bgCanvas, jellyCanvas, textCanvas]) {
+    c.width = Math.floor(width * dpr)
+    c.height = Math.floor(height * dpr)
+    c.style.width = `${width}px`
+    c.style.height = `${height}px`
+  }
+  bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
   textCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
   jellyCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
 }
@@ -392,15 +396,16 @@ function frame(now: number): void {
     waveMemory,
   })
 
-  textCtx.fillStyle = '#0a1628'
-  textCtx.fillRect(0, 0, width, height)
+  bgCtx.fillStyle = '#0a1628'
+  bgCtx.fillRect(0, 0, width, height)
 
-  drawRipples(textCtx, ripples, clock, rippleSpeedScale)
-
-  drawLines(textCtx, lines)
+  drawRipples(bgCtx, ripples, clock, rippleSpeedScale)
 
   jellyCtx.clearRect(0, 0, width, height)
   drawJellyfish(jellyCtx, jelly, { underwater })
+
+  textCtx.clearRect(0, 0, width, height)
+  drawLines(textCtx, lines)
 
   requestAnimationFrame(frame)
 }

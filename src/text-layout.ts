@@ -16,6 +16,20 @@ import { carveTextLineSlots, mergeIntervals, type Interval } from './intervals'
 export const BODY_FONT =
   '400 19px "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif'
 
+/** Page background (must match CSS `body` / stage fill). Used to turn glyph rgba into a solid color when text is composited above the jelly layer. */
+const PAGE_BG = { r: 0x0a, g: 0x16, b: 0x28 }
+/** Glyphs were `rgba(232, 224, 208, 0.92)` on the page background; solid equivalent so text does not pick up the jelly underneath. */
+const TEXT_FILL_SOLID = (() => {
+  const tr = 232
+  const tg = 224
+  const tb = 208
+  const a = 0.92
+  const r = Math.round(tr * a + PAGE_BG.r * (1 - a))
+  const g = Math.round(tg * a + PAGE_BG.g * (1 - a))
+  const b = Math.round(tb * a + PAGE_BG.b * (1 - a))
+  return `rgb(${r} ${g} ${b})`
+})()
+
 export type LaidOutLine = {
   x: number
   y: number
@@ -124,7 +138,7 @@ export function layoutLinesForObstacle(
 
 export function drawLines(ctx: CanvasRenderingContext2D, lines: LaidOutLine[]): void {
   ctx.font = BODY_FONT
-  ctx.fillStyle = 'rgba(232, 224, 208, 0.92)'
+  ctx.fillStyle = TEXT_FILL_SOLID
   ctx.textBaseline = 'top'
 
   for (let i = 0; i < lines.length; i++) {
