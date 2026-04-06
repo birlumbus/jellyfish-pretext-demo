@@ -555,7 +555,8 @@ function appendJellyfishOutlinePath(
     )
   }
 
-  if (n === 0 || polys[n - 1] === null) {
+  // Any null (e.g. frond length < 4 when compressed) breaks the chain; prev can be null in the loop.
+  if (n === 0 || polys.some(p => p === null)) {
     ctx.moveTo(pL.x, pL.y)
     ctx.arc(mx, my, r, angL, angR, anticlockwise)
     ctx.lineTo(pL.x, pL.y)
