@@ -13,13 +13,21 @@ import {
   layoutLinesForObstacle,
 } from './text-layout'
 
-/** After the visual ripple finishes expanding, wait this long before text carve-out *starts* receding. */
+/**
+ * After the visual ripple finishes expanding, wait this long before text carve-out *starts* receding
+ * (at ripple speed 1×; scaled by `msScaledByRippleSpeed` for other speeds).
+ */
 const WAVE_TEXT_POST_RIPPLE_DELAY_MS = 250
 /**
- * Duration of the recede animation alone (does **not** include the post-ripple delay above).
+ * Duration of the recede animation alone (does **not** include the post-ripple delay above), at ripple speed 1×.
  * Easing is ease-in-out so motion is spread across the full window (ease-out-only felt much faster).
  */
 const WAVE_TEXT_RECEDE_DURATION_MS = 2400
+
+/** Wall-clock ms for a “ripple-time” duration: faster ripples shorten wait + recede to match. */
+function msScaledByRippleSpeed(baseMs: number): number {
+  return baseMs / Math.max(1e-6, rippleSpeedScale)
+}
 
 /** Max completed wave-text recede animations at once (3rd overlapping cycle drops the oldest). */
 const MAX_WAVE_TEXT_RECDE_SLOTS = 2
@@ -152,7 +160,7 @@ function advanceWaitRecedeState(clock: number, state: WaitRecedeState | null): W
       ...state,
       phase: 'receding',
       tRecedeStart: clock,
-      tRecedeEnd: clock + WAVE_TEXT_RECEDE_DURATION_MS,
+      tRecedeEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_RECEDE_DURATION_MS),
     }
   }
   if (state.phase === 'receding' && clock >= state.tRecedeEnd) {
@@ -177,7 +185,7 @@ function transitionWaveTextAfterRipplesRemoved(clock: number): void {
         cy: diveWaveImprint.y,
         ringLayoutR: [...diveWaveImprint.ringLayoutR] as [number, number, number],
         phase: 'wait',
-        tWaitEnd: clock + WAVE_TEXT_POST_RIPPLE_DELAY_MS,
+        tWaitEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_POST_RIPPLE_DELAY_MS),
         tRecedeStart: 0,
         tRecedeEnd: 0,
       })
@@ -194,7 +202,7 @@ function transitionWaveTextAfterRipplesRemoved(clock: number): void {
         cy: surfaceTextImprint.cy,
         ringLayoutR: [...surfaceTextImprint.ringLayoutR] as [number, number, number],
         phase: 'wait',
-        tWaitEnd: clock + WAVE_TEXT_POST_RIPPLE_DELAY_MS,
+        tWaitEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_POST_RIPPLE_DELAY_MS),
         tRecedeStart: 0,
         tRecedeEnd: 0,
         sessionT0: t0,
@@ -302,7 +310,7 @@ addEventListener('click', e => {
         cy: surfaceTextImprint.cy,
         ringLayoutR: [...surfaceTextImprint.ringLayoutR] as [number, number, number],
         phase: 'wait',
-        tWaitEnd: clock + WAVE_TEXT_POST_RIPPLE_DELAY_MS,
+        tWaitEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_POST_RIPPLE_DELAY_MS),
         tRecedeStart: 0,
         tRecedeEnd: 0,
         sessionT0: surfaceTextImprint.sessionT0,
@@ -320,7 +328,7 @@ addEventListener('click', e => {
         cy: diveWaveImprint.y,
         ringLayoutR: [...diveWaveImprint.ringLayoutR] as [number, number, number],
         phase: 'wait',
-        tWaitEnd: clock + WAVE_TEXT_POST_RIPPLE_DELAY_MS,
+        tWaitEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_POST_RIPPLE_DELAY_MS),
         tRecedeStart: 0,
         tRecedeEnd: 0,
       })
