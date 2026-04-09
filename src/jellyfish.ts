@@ -49,6 +49,13 @@ const LENGTH_RELAX = 0.42
 /** Single peach fill for bell + fronds (no gradient). */
 const FILL = 'rgb(255, 188, 138)'
 const STROKE = 'rgba(120, 58, 28, 0.82)'
+/**
+ * Underwater look was originally `brightness(0.52) saturate(0.72) contrast(0.95)` on the base
+ * colors, but iOS Safari often ignores `CanvasRenderingContext2D.filter`, so we bake equivalent
+ * RGBA values instead of relying on CSS filters.
+ */
+const FILL_UNDERWATER = 'rgb(124, 99, 81)'
+const STROKE_UNDERWATER = 'rgba(55, 32, 21, 0.82)'
 const STROKE_W = 1.2
 
 type Frond = {
@@ -442,6 +449,7 @@ function drawPearFrondFill(
   downY: number,
   upX: number,
   upY: number,
+  fillStyle: string,
 ): void {
   const p = getFrondPoly(ax, ay, tipX, tipY, rimTx, rimTy, downX, downY)
   if (p === null) return
@@ -456,7 +464,7 @@ function drawPearFrondFill(
   ctx.quadraticCurveTo(capX, capY, p.tl.x, p.tl.y)
   ctx.closePath()
 
-  ctx.fillStyle = FILL
+  ctx.fillStyle = fillStyle
   ctx.fill()
 }
 
@@ -499,6 +507,7 @@ function drawBellBodyFill(
   baseY: number,
   apexX: number,
   apexY: number,
+  fillStyle: string,
 ): void {
   const { pL, mx, my, r, angL, angR, anticlockwise } = bellArcParams(baseX, baseY, apexX, apexY)
 
@@ -508,7 +517,7 @@ function drawBellBodyFill(
   ctx.lineTo(pL.x, pL.y)
   ctx.closePath()
 
-  ctx.fillStyle = FILL
+  ctx.fillStyle = fillStyle
   ctx.fill()
 }
 
@@ -580,19 +589,35 @@ export function drawJellyfish(
   const downX = -ux
   const downY = -uy
 
+  const uw = options?.underwater === true
+  const fillStyle = uw ? FILL_UNDERWATER : FILL
+  const strokeStyle = uw ? STROKE_UNDERWATER : STROKE
+
   ctx.save()
-  if (options?.underwater) {
-    ctx.filter = 'brightness(0.52) saturate(0.72) contrast(0.95)'
+  if (uw) {
     ctx.globalAlpha = 0.9
   }
 
   for (let i = 0; i < state.fronds.length; i++) {
     const f = state.fronds[i]!
     const anchor = frondAttach(state.x, state.y, ux, uy, vx, vy, i)
-    drawPearFrondFill(ctx, anchor.x, anchor.y, f.tipX, f.tipY, anchor.rimTx, anchor.rimTy, downX, downY, ux, uy)
+    drawPearFrondFill(
+      ctx,
+      anchor.x,
+      anchor.y,
+      f.tipX,
+      f.tipY,
+      anchor.rimTx,
+      anchor.rimTy,
+      downX,
+      downY,
+      ux,
+      uy,
+      fillStyle,
+    )
   }
 
-  drawBellBodyFill(ctx, state.x, state.y, state.apexX, state.apexY)
+  drawBellBodyFill(ctx, state.x, state.y, state.apexX, state.apexY, fillStyle)
 
   ctx.beginPath()
   appendJellyfishOutlinePath(
@@ -609,7 +634,7 @@ export function drawJellyfish(
     downX,
     downY,
   )
-  ctx.strokeStyle = STROKE
+  ctx.strokeStyle = strokeStyle
   ctx.lineWidth = STROKE_W
   ctx.lineJoin = 'round'
   ctx.lineCap = 'round'
