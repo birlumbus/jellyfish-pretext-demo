@@ -1,61 +1,13 @@
 /**
- * Entry: three canvases (background + ripples, jellyfish, text on top). Pointer drives the jelly;
- * clicks alternate dive/surface mode and coordinate ripple + text carve-out state.
+ * Original spring-following bell, flowing tendrils, animated depth, and splash-to-wave transitions.
+ * Water is a static CSS backdrop; separate canvases keep the creature beneath crisp text.
  */
 import './style.css'
-import {
-  createJellyfishState,
-  drawJellyfish,
-  layoutObstacleFromState,
-  stepJellyfish,
-} from './jellyfish'
-import { drawRipples, layoutRadiusForRippleRing, pushRipple, removeExpiredRipples, type Ripple } from './ripples'
-import {
-  BODY_FONT,
-  drawLines,
-  getPreparedBody,
-  layoutLinesForObstacle,
-} from './text-layout'
-
-/** Delay after the ripple animation ends before the carved text band begins to fade (scaled by ripple speed). */
-const WAVE_TEXT_POST_RIPPLE_DELAY_MS = 250
-/** Duration of the text carve-out fade (scaled by ripple speed); uses ease-in-out. */
-const WAVE_TEXT_RECEDE_DURATION_MS = 2400
-
-function msScaledByRippleSpeed(baseMs: number): number {
-  return baseMs / Math.max(1e-6, rippleSpeedScale)
-}
-
-/** How many post-ripple fade animations to keep; older ones drop if the user clicks quickly. */
-const MAX_WAVE_TEXT_RECEDE_SLOTS = 2
-
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
-}
-
-type WaitRecedeState = {
-  cx: number
-  cy: number
-  ringLayoutR: [number, number, number]
-  phase: 'wait' | 'receding'
-  tWaitEnd: number
-  tRecedeStart: number
-  tRecedeEnd: number
-}
-
-/** `sessionT0` links a surface ripple to its carve-out when excluding duplicate layout blocks. */
-type TrackedRecede = WaitRecedeState & { sessionT0?: number }
-
-function scaleFromWaitRecede(s: WaitRecedeState, clock: number): number {
-  if (s.phase === 'wait') return 1
-  const u = (clock - s.tRecedeStart) / (s.tRecedeEnd - s.tRecedeStart)
-  if (u >= 1) return 0
-  return 1 - easeInOutCubic(u)
-}
-
-function maxRing(r: readonly [number, number, number]): number {
-  return Math.max(r[0], r[1], r[2])
-}
+import { BODY_COPY } from './copy'
+import { clampTarget, getSceneGeometry } from './scene'
+import { createJellyfishState, drawJellyfish, layoutObstacleFromState, setJellyfishDepth, stepJellyfish } from './jellyfish'
+import { drawRipples, drawSplash, pushRipple, stepRipples, type Ripple } from './ripples'
+import { getBodyFont, drawLines, getPreparedBody, layoutLinesForObstacle } from './text-layout'
 
 const stageRoot = document.getElementById('stage')
 if (stageRoot === null) throw new Error('#stage missing')
@@ -78,198 +30,42 @@ const bgCtx: CanvasRenderingContext2D = bgCtxRaw
 const textCtx: CanvasRenderingContext2D = textCtxRaw
 const jellyCtx: CanvasRenderingContext2D = jellyCtxRaw
 
-const LINE_HEIGHT = 30
-const MARGIN = 28
-
 let dpr = window.devicePixelRatio || 1
-let width = 0
-let height = 0
-
-let pointerX = 0
-let pointerY = 0
-
-/** Sliders: 1 = default; jelly scales physics `dt`, ripples scale effective age. */
-let jellySpeedScale = 1
-let rippleSpeedScale = 1
-
-/** Underwater visual mode (dim jelly); text ignores jelly, only waves carve copy. */
+let width = 0, height = 0
+let pointerX = 0, pointerY = 0
+let scene = getSceneGeometry(0, 0)
+let jelly = createJellyfishState(0, 0)
 let underwater = false
-
-/** While the dive ripple is animating — max ring radii for layout. */
-type DiveWaveImprint = {
-  x: number
-  y: number
-  ringLayoutR: [number, number, number]
-}
-let diveWaveImprint: DiveWaveImprint | null = null
-
-/** While the surface ripple is animating — max radii (surfaced). */
-type SurfaceTextImprint = {
-  cx: number
-  cy: number
-  ringLayoutR: [number, number, number]
-  sessionT0: number
-}
-let surfaceTextImprint: SurfaceTextImprint | null = null
-
-let waveTextRecedes: TrackedRecede[] = []
-
-function pushWaveTextRecede(item: TrackedRecede): void {
-  waveTextRecedes.push(item)
-  while (waveTextRecedes.length > MAX_WAVE_TEXT_RECEDE_SLOTS) {
-    waveTextRecedes.shift()
-  }
-}
-
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)')
+let stillWater = reducedMotion.matches
+let jellySpeedScale = 1, rippleSpeedScale = 1
+let requestedFrame = 0
+let fontsReady = false
 const ripples: Ripple[] = []
-const MAX_RIPPLES = 2
 
-function updateDiveWaveImprintFromRipples(clock: number): void {
-  if (!underwater || diveWaveImprint === null) return
-  for (const r of ripples) {
-    if (r.kind !== 'dive') continue
-    const age = ((clock - r.t0) / 1000) * rippleSpeedScale
-    if (age < 0) continue
-    for (let k = 0; k < 3; k++) {
-      const lr = layoutRadiusForRippleRing(age, k)
-      if (lr === null) continue
-      diveWaveImprint.ringLayoutR[k] = Math.max(diveWaveImprint.ringLayoutR[k], lr)
-    }
-  }
+function requestRender(): void {
+  if (fontsReady && requestedFrame === 0) requestedFrame = requestAnimationFrame(frame)
 }
-
-function updateSurfaceTextImprintFromRipples(clock: number): void {
-  if (underwater || surfaceTextImprint === null) return
-  const r = ripples.find(ripple => ripple.kind === 'surface' && ripple.t0 === surfaceTextImprint!.sessionT0)
-  if (r === undefined) return
-  const age = ((clock - r.t0) / 1000) * rippleSpeedScale
-  if (age < 0) return
-  for (let k = 0; k < 3; k++) {
-    const lr = layoutRadiusForRippleRing(age, k)
-    if (lr === null) continue
-    surfaceTextImprint.ringLayoutR[k] = Math.max(surfaceTextImprint.ringLayoutR[k], lr)
-  }
-}
-
-function advanceWaitRecedeState(clock: number, state: WaitRecedeState | null): WaitRecedeState | null {
-  if (state === null) return null
-  if (state.phase === 'wait' && clock >= state.tWaitEnd) {
-    return {
-      ...state,
-      phase: 'receding',
-      tRecedeStart: clock,
-      tRecedeEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_RECEDE_DURATION_MS),
-    }
-  }
-  if (state.phase === 'receding' && clock >= state.tRecedeEnd) {
-    return null
-  }
-  return state
-}
-
-function advanceTrackedRecede(clock: number, s: TrackedRecede): TrackedRecede | null {
-  const next = advanceWaitRecedeState(clock, s)
-  if (next === null) return null
-  return { ...next, sessionT0: s.sessionT0 }
-}
-
-/** When a ripple expires, hand off its carve-out to the wait/recede queue if needed. */
-function transitionWaveTextAfterRipplesRemoved(clock: number): void {
-  if (underwater && diveWaveImprint !== null) {
-    const hasDiveRipple = ripples.some(r => r.kind === 'dive')
-    if (!hasDiveRipple && maxRing(diveWaveImprint.ringLayoutR) > 0) {
-      pushWaveTextRecede({
-        cx: diveWaveImprint.x,
-        cy: diveWaveImprint.y,
-        ringLayoutR: [...diveWaveImprint.ringLayoutR] as [number, number, number],
-        phase: 'wait',
-        tWaitEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_POST_RIPPLE_DELAY_MS),
-        tRecedeStart: 0,
-        tRecedeEnd: 0,
-      })
-      diveWaveImprint = null
-    }
-  }
-
-  if (!underwater && surfaceTextImprint !== null) {
-    const t0 = surfaceTextImprint.sessionT0
-    const hasSurfaceRipple = ripples.some(r => r.kind === 'surface' && r.t0 === t0)
-    if (!hasSurfaceRipple && maxRing(surfaceTextImprint.ringLayoutR) > 0) {
-      pushWaveTextRecede({
-        cx: surfaceTextImprint.cx,
-        cy: surfaceTextImprint.cy,
-        ringLayoutR: [...surfaceTextImprint.ringLayoutR] as [number, number, number],
-        phase: 'wait',
-        tWaitEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_POST_RIPPLE_DELAY_MS),
-        tRecedeStart: 0,
-        tRecedeEnd: 0,
-        sessionT0: t0,
-      })
-      surfaceTextImprint = null
-    }
-  }
-}
-
-type WaveMemoryPayload = {
-  memories: { cx: number; cy: number; ringLayoutR: [number, number, number]; scale: number }[]
-}
-
-function computeWaveMemory(clock: number): WaveMemoryPayload | undefined {
-  const memories: WaveMemoryPayload['memories'] = []
-
-  for (const tr of waveTextRecedes) {
-    const sc = scaleFromWaitRecede(tr, clock)
-    if (sc > 0) {
-      memories.push({
-        cx: tr.cx,
-        cy: tr.cy,
-        ringLayoutR: tr.ringLayoutR,
-        scale: sc,
-      })
-    }
-  }
-
-  if (underwater && diveWaveImprint !== null) {
-    memories.push({
-      cx: diveWaveImprint.x,
-      cy: diveWaveImprint.y,
-      ringLayoutR: diveWaveImprint.ringLayoutR,
-      scale: 1,
-    })
-  }
-
-  if (!underwater && surfaceTextImprint !== null) {
-    memories.push({
-      cx: surfaceTextImprint.cx,
-      cy: surfaceTextImprint.cy,
-      ringLayoutR: surfaceTextImprint.ringLayoutR,
-      scale: 1,
-    })
-  }
-
-  return memories.length > 0 ? { memories } : undefined
-}
-
-/** Surface ripples already represented by imprints or recede slots are omitted to avoid double-blocking. */
-function ripplesForTextLayout(): Ripple[] {
-  const surfaceT0s = new Set<number>()
-  if (surfaceTextImprint !== null) {
-    surfaceT0s.add(surfaceTextImprint.sessionT0)
-  }
-  for (const tr of waveTextRecedes) {
-    if (tr.sessionT0 !== undefined) {
-      surfaceT0s.add(tr.sessionT0)
-    }
-  }
-  if (surfaceT0s.size === 0) return ripples
-  return ripples.filter(r => !(r.kind === 'surface' && surfaceT0s.has(r.t0)))
-}
+function clearWaves(): void { ripples.length = 0 }
 
 function resize(): void {
+  const oldWidth = width
+  const oldHeight = height
   dpr = window.devicePixelRatio || 1
   const rect = stageEl.getBoundingClientRect()
   width = rect.width
   height = rect.height
+  scene = getSceneGeometry(width, height)
+  const target = clampTarget(
+    oldWidth > 0 ? pointerX / oldWidth * width : width * 0.52,
+    oldHeight > 0 ? pointerY / oldHeight * height : height * 0.40,
+    scene,
+  )
+  pointerX = target.x
+  pointerY = target.y
+  jelly = createJellyfishState(pointerX, pointerY)
+  setJellyfishDepth(jelly, underwater, true)
+  clearWaves()
   for (const c of [bgCanvas, jellyCanvas, textCanvas]) {
     c.width = Math.floor(width * dpr)
     c.height = Math.floor(height * dpr)
@@ -279,71 +75,103 @@ function resize(): void {
   bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
   textCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
   jellyCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  requestRender()
 }
 
-addEventListener('resize', resize)
-addEventListener('pointermove', e => {
+function setTarget(x: number, y: number): void {
+  pointerX = x
+  pointerY = y
+  if (stillWater) {
+    jelly = createJellyfishState(pointerX, pointerY)
+    setJellyfishDepth(jelly, underwater, true)
+  }
+  requestRender()
+}
+
+function setTargetFromPointer(e: PointerEvent): void {
   const rect = stageEl.getBoundingClientRect()
-  pointerX = e.clientX - rect.left
-  pointerY = e.clientY - rect.top
+  setTarget(e.clientX - rect.left, e.clientY - rect.top)
+}
+
+const hint = document.getElementById('interaction-hint')!
+const touchPointer = matchMedia('(pointer: coarse)')
+function updateHint(keyboard = false): void {
+  hint.textContent = keyboard ? 'Arrow keys to swim. Space to dive.'
+    : touchPointer.matches ? 'Drag to swim. Tap to dive.' : 'Move to swim. Click to dive.'
+}
+updateHint()
+touchPointer.addEventListener('change', () => updateHint())
+
+let dragStart: { x: number; y: number; id: number } | null = null
+let dragged = false
+stageEl.addEventListener('pointerdown', e => {
+  if (dragStart !== null && dragStart.id !== e.pointerId) return
+  dragged = false
+  dragStart = { x: e.clientX, y: e.clientY, id: e.pointerId }
+  if (e.pointerType === 'touch') stageEl.setPointerCapture(e.pointerId)
+  setTargetFromPointer(e)
 })
-
-resize()
-pointerX = width * 0.5
-pointerY = height * 0.45
-const jelly = createJellyfishState(pointerX, pointerY)
-
-addEventListener('click', e => {
-  if (!(e.target instanceof Node) || !stageEl.contains(e.target)) return
-  const { cx, cy } = layoutObstacleFromState(jelly)
-  const clock = performance.now()
-
-  if (!underwater) {
-    if (surfaceTextImprint !== null && maxRing(surfaceTextImprint.ringLayoutR) > 0) {
-      pushWaveTextRecede({
-        cx: surfaceTextImprint.cx,
-        cy: surfaceTextImprint.cy,
-        ringLayoutR: [...surfaceTextImprint.ringLayoutR] as [number, number, number],
-        phase: 'wait',
-        tWaitEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_POST_RIPPLE_DELAY_MS),
-        tRecedeStart: 0,
-        tRecedeEnd: 0,
-        sessionT0: surfaceTextImprint.sessionT0,
-      })
-    }
-    surfaceTextImprint = null
-
-    pushRipple(ripples, cx, cy, 'dive', MAX_RIPPLES)
-    underwater = true
-    diveWaveImprint = { x: cx, y: cy, ringLayoutR: [0, 0, 0] }
-  } else {
-    if (diveWaveImprint !== null && maxRing(diveWaveImprint.ringLayoutR) > 0) {
-      pushWaveTextRecede({
-        cx: diveWaveImprint.x,
-        cy: diveWaveImprint.y,
-        ringLayoutR: [...diveWaveImprint.ringLayoutR] as [number, number, number],
-        phase: 'wait',
-        tWaitEnd: clock + msScaledByRippleSpeed(WAVE_TEXT_POST_RIPPLE_DELAY_MS),
-        tRecedeStart: 0,
-        tRecedeEnd: 0,
-      })
-    }
-    diveWaveImprint = null
-
-    pushRipple(ripples, cx, cy, 'surface', MAX_RIPPLES)
-    const last = ripples[ripples.length - 1]
-    const surfaceT0 = last !== undefined ? last.t0 : clock
-
-    underwater = false
-
-    surfaceTextImprint = {
-      cx,
-      cy,
-      ringLayoutR: [0, 0, 0],
-      sessionT0: surfaceT0,
-    }
+window.addEventListener('pointermove', e => {
+  if (dragStart !== null && dragStart.id !== e.pointerId) return
+  if (e.pointerType === 'touch' && dragStart === null) return
+  if (dragStart !== null && Math.hypot(e.clientX - dragStart.x, e.clientY - dragStart.y) > 8) dragged = true
+  updateHint()
+  setTargetFromPointer(e)
+})
+window.addEventListener('pointerup', e => { if (dragStart?.id === e.pointerId) dragStart = null })
+window.addEventListener('pointercancel', e => { if (dragStart?.id === e.pointerId) { dragStart = null; dragged = true } })
+stageEl.addEventListener('click', () => {
+  if (!dragged) toggleDepth()
+  dragged = false
+})
+stageEl.addEventListener('keydown', e => {
+  const step = e.shiftKey ? 56 : 28
+  const moves: Record<string, [number, number]> = {
+    ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step],
+  }
+  const move = moves[e.key]
+  if (move !== undefined) {
+    e.preventDefault()
+    updateHint(true)
+    const target = clampTarget(pointerX + move[0], pointerY + move[1], scene)
+    setTarget(target.x, target.y)
+  } else if (e.key === ' ' || e.key === 'Enter') {
+    e.preventDefault()
+    updateHint(true)
+    toggleDepth()
   }
 })
+stageEl.addEventListener('blur', () => updateHint())
+new ResizeObserver(resize).observe(stageEl)
+resize()
+
+const diveButton = document.getElementById('dive')!
+const depthLabel = document.getElementById('depth-label')!
+const depthStatus = document.getElementById('depth-status')!
+function updateDepth(): void {
+  depthLabel.textContent = underwater ? 'Surface' : 'Dive'
+  diveButton.setAttribute('aria-label', underwater ? 'Return to the surface' : 'Dive below the words')
+  depthStatus.textContent = underwater ? 'Below the words.' : 'At the surface.'
+}
+diveButton.addEventListener('click', toggleDepth)
+
+function toggleDepth(): void {
+  underwater = !underwater
+  setJellyfishDepth(jelly, underwater, stillWater)
+  if (!stillWater) {
+    const { cx, cy, r } = layoutObstacleFromState(jelly, scene.jellyScale)
+    const above = layoutObstacleFromState({ ...jelly, depth: 0 }, scene.jellyScale)
+    const below = layoutObstacleFromState({ ...jelly, depth: 1 }, scene.jellyScale)
+    const ripple = pushRipple(ripples, cx, cy, underwater ? 'dive' : 'surface', 3, scene.rippleRadius, r * 1.12)
+    ripple.depthAtImpact = jelly.depth
+    ripple.depth = jelly.depth
+    ripple.depthShift = { x: below.cx - above.cx, y: below.cy - above.cy }
+  } else {
+    clearWaves()
+  }
+  updateDepth()
+  requestRender()
+}
 
 function bindSpeedSliders(): void {
   const jellyEl = document.getElementById('jelly-speed')
@@ -360,6 +188,9 @@ function bindSpeedSliders(): void {
     rippleLabel.textContent = `${rippleSpeedScale.toFixed(2)}×`
     jellyEl.setAttribute('aria-valuenow', jellyEl.value)
     rippleEl.setAttribute('aria-valuenow', rippleEl.value)
+    jellyEl.setAttribute('aria-valuetext', `${jellySpeedScale.toFixed(2)} times normal speed`)
+    rippleEl.setAttribute('aria-valuetext', `${rippleSpeedScale.toFixed(2)} times normal speed`)
+    requestRender()
   }
   jellyEl.addEventListener('input', apply)
   rippleEl.addEventListener('input', apply)
@@ -367,53 +198,70 @@ function bindSpeedSliders(): void {
 }
 bindSpeedSliders()
 
+const passage = document.getElementById('accessible-passage')!
+passage.textContent = BODY_COPY
+const stillInput = document.getElementById('still-water') as HTMLInputElement
+let userChoseMotion = false
+function syncSpeedControls(): void {
+  for (const id of ['jelly-speed', 'ripple-speed']) {
+    const slider = document.getElementById(id) as HTMLInputElement
+    slider.disabled = stillWater
+  }
+}
+function applyStillWater(): void {
+  stillWater = stillInput.checked
+  if (stillWater) {
+    clearWaves()
+    jelly = createJellyfishState(pointerX, pointerY)
+    setJellyfishDepth(jelly, underwater, true)
+  }
+  syncSpeedControls()
+  last = performance.now()
+  requestRender()
+}
+stillInput.checked = stillWater
+stillInput.addEventListener('change', () => { userChoseMotion = true; applyStillWater() })
+reducedMotion.addEventListener('change', () => {
+  if (!userChoseMotion) {
+    stillInput.checked = reducedMotion.matches
+    applyStillWater()
+  }
+})
+const settings = document.getElementById('motion-settings') as HTMLDetailsElement
+settings.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    settings.open = false
+    settings.querySelector('summary')?.focus()
+  }
+})
+document.addEventListener('pointerdown', e => {
+  if (e.target instanceof Node && !settings.contains(e.target)) settings.open = false
+})
+
 let last = performance.now()
+applyStillWater()
 function frame(now: number): void {
+  requestedFrame = 0
   const dt = Math.min(0.05, (now - last) / 1000)
   last = now
-
-  const clock = performance.now()
-
-  stepJellyfish(jelly, pointerX, pointerY, dt * jellySpeedScale)
-
-  updateDiveWaveImprintFromRipples(clock)
-  updateSurfaceTextImprintFromRipples(clock)
-
-  removeExpiredRipples(ripples, clock, rippleSpeedScale)
-
-  transitionWaveTextAfterRipplesRemoved(clock)
-
-  waveTextRecedes = waveTextRecedes.map(tr => advanceTrackedRecede(clock, tr)).filter((tr): tr is TrackedRecede => tr !== null)
-
-  const waveMemory = computeWaveMemory(clock)
-
-  const prepared = getPreparedBody()
-  const lines = layoutLinesForObstacle(prepared, width, height, MARGIN, LINE_HEIGHT, jelly, {
-    ripples: ripplesForTextLayout(),
-    nowMs: clock,
-    rippleSpeed: rippleSpeedScale,
-    omitJellyObstacle: underwater,
-    waveMemory,
-  })
-
-  bgCtx.fillStyle = '#0a1628'
-  bgCtx.fillRect(0, 0, width, height)
-
-  drawRipples(bgCtx, ripples, clock, rippleSpeedScale)
-
+  if (!stillWater) {
+    stepJellyfish(jelly, pointerX, pointerY, dt, jellySpeedScale)
+    stepRipples(ripples, dt, rippleSpeedScale)
+    for (const ripple of ripples) ripple.depth = jelly.depth
+  }
+  const lines = layoutLinesForObstacle(getPreparedBody(scene.fontSize), scene, jelly, { ripples })
+  bgCtx.clearRect(0, 0, width, height)
+  drawRipples(bgCtx, ripples)
   jellyCtx.clearRect(0, 0, width, height)
-  drawJellyfish(jellyCtx, jelly, { underwater })
-
+  drawJellyfish(jellyCtx, jelly, { scale: scene.jellyScale })
+  drawSplash(jellyCtx, ripples)
   textCtx.clearRect(0, 0, width, height)
-  drawLines(textCtx, lines)
-
-  requestAnimationFrame(frame)
+  drawLines(textCtx, lines, scene.fontSize)
+  if (!stillWater) requestRender()
 }
-
-void document.fonts.load(BODY_FONT).finally(() => {
-  getPreparedBody()
-  requestAnimationFrame(t => {
-    last = t
-    requestAnimationFrame(frame)
-  })
+void document.fonts.load(getBodyFont(scene.fontSize)).finally(() => {
+  getPreparedBody(scene.fontSize)
+  fontsReady = true
+  last = performance.now()
+  requestRender()
 })

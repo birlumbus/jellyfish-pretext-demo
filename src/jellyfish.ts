@@ -1,224 +1,79 @@
-import type { Interval } from './intervals'
-import { circleBlockedIntervalForBand, mergeIntervals } from './intervals'
+import { mergeIntervals, type Interval } from './intervals.ts'
 
-/** Horizontal half-width of the bell rim in local “across” space. */
-const BELL_RX = 52
-/** Circle radius for pretext reflow (centered between base and apex). */
-export const BODY_RADIUS_LAYOUT = 58
-/** Extra horizontal padding around frond bounds (curves + stroke extend past control points). */
-const FROND_LAYOUT_PAD_X = 7
+type Point = { x: number; y: number }
+type Frond = { tipX: number; tipY: number; vx: number; vy: number; bend: number; bendVelocity: number; length: number; width: number; phase: number }
 
-const FROND_LENGTH = 48
-/** Hard cap on |tip − anchor| so faster body motion does not stretch fronds beyond prior range. */
-const FROND_MAX_ANCHOR_DIST = FROND_LENGTH + 18
-const FROND_TOP_W = 8
-const FROND_BOT_W = 15
-const FROND_COUNT = 6
-const FROND_UNDERLAP = 4
-/** Keep frond anchors off the rim endpoints so end fronds sit under the dome, not past pL/pR. */
-const RIM_U_INSET = 0.09
-
-/** Damped spring: stiffness (1/s² scale) and damping coefficient (1/s). */
-const FROND_STIFFNESS = 42
-const FROND_DAMPING = 14
-const SWAY_AMP = 2.6
-/** Secondary motion from body drift (not raw cursor). */
-const BODY_MOTION_INFLUENCE = 0.08
-
-/** Target distance |apex − base| (side-view bell height). */
-const BELL_REST_LENGTH = 68
-
-/** Time constant (seconds) for low-pass cursor — smaller = tighter follow. */
+const BELL_WIDTH = 52
+const BELL_HEIGHT = 68
+// Original demo attraction, drag, and trailing-base spring parameters.
+const BELL_REST_LENGTH = BELL_HEIGHT
 const SMOOTH_CURSOR_TAU = 0.028
-
-/** Cursor attraction on the apex (after smoothing). */
 const K_ATTRACT = 86
 const DRAG_LINEAR = 18
 const DRAG_QUAD = 0.024
 const MAX_SPEED_APEX = 340
-
-/** Base follows apex through the “water”. */
 const K_BASE = 50
 const BASE_DRAG_LINEAR = 13
 const BASE_DRAG_QUAD = 0.015
 const MAX_SPEED_BASE = 260
-
-/** After integration, nudge toward exact rest length (stable hinge). */
 const LENGTH_RELAX = 0.42
-
-/** Single peach fill for bell + fronds (no gradient). */
-const FILL = 'rgb(255, 188, 138)'
-const STROKE = 'rgba(120, 58, 28, 0.82)'
-/**
- * Underwater look was originally `brightness(0.52) saturate(0.72) contrast(0.95)` on the base
- * colors, but iOS Safari often ignores `CanvasRenderingContext2D.filter`, so we bake equivalent
- * RGBA values instead of relying on CSS filters.
- */
-const FILL_UNDERWATER = 'rgb(124, 99, 81)'
-const STROKE_UNDERWATER = 'rgba(55, 32, 21, 0.82)'
-const STROKE_W = 1.2
-
-type Frond = {
-  tipX: number
-  tipY: number
-  vx: number
-  vy: number
-  phase: number
-}
+const LENGTHS = [62, 82, 72, 96, 75, 86, 66]
+const WIDTHS = [5.5, 3.8, 6.2, 4.0, 6.0, 3.6, 5.0]
+export const BODY_RADIUS_LAYOUT = 58
 
 export type JellyfishState = {
-  /** Rim center (oral side); fronds attach here. */
-  x: number
-  y: number
-  baseVx: number
-  baseVy: number
-  /** Bell tip — pulled toward smoothed cursor. */
-  apexX: number
-  apexY: number
-  apexVx: number
-  apexVy: number
-  fronds: Frond[]
+  x: number; y: number
+  apexX: number; apexY: number
+  apexVx: number; apexVy: number
+  baseVx: number; baseVy: number
+  smoothX: number; smoothY: number
   time: number
-  /** Low-pass filtered pointer; apex tracks this. */
-  smoothX: number
-  smoothY: number
+  depth: number
+  depthTarget: number
+  revision: number
+  fronds: Frond[]
 }
 
-function bellBasis(apexX: number, apexY: number, baseX: number, baseY: number) {
-  const dx = apexX - baseX
-  const dy = apexY - baseY
-  const len = Math.hypot(dx, dy) || 1
-  const ux = dx / len
-  const uy = dy / len
-  const vx = -uy
-  const vy = ux
-  return { ux, uy, vx, vy }
+export function getBellGeometry() {
+  return { width: BELL_WIDTH, height: BELL_HEIGHT }
 }
 
-/** Rim point in world space; uParam ∈ [0,1] along the rim arc. */
-function rimPointWorld(
-  baseX: number,
-  baseY: number,
-  _ux: number,
-  _uy: number,
-  vx: number,
-  vy: number,
-  uParam: number,
-): { x: number; y: number } {
-  const lx = -BELL_RX + 2 * BELL_RX * uParam
-  return {
-    x: baseX + vx * lx,
-    y: baseY + vy * lx,
-  }
+function basis(state: JellyfishState) {
+  const dx = state.apexX - state.x, dy = state.apexY - state.y
+  const length = Math.hypot(dx, dy) || 1
+  const forward = { x: dx / length, y: dy / length }
+  return { forward, across: { x: -forward.y, y: forward.x }, down: { x: -forward.x, y: -forward.y } }
 }
 
-/** Unit tangent d/d u along the rim (increasing u = left → right). */
-function rimTangentWorld(
-  baseX: number,
-  baseY: number,
-  ux: number,
-  uy: number,
-  vx: number,
-  vy: number,
-  uParam: number,
-): { x: number; y: number } {
-  const e = 0.004
-  const p0 = rimPointWorld(baseX, baseY, ux, uy, vx, vy, Math.max(0, uParam - e))
-  const p1 = rimPointWorld(baseX, baseY, ux, uy, vx, vy, Math.min(1, uParam + e))
-  let tx = p1.x - p0.x
-  let ty = p1.y - p0.y
-  const tlen = Math.hypot(tx, ty) || 1
-  return { x: tx / tlen, y: ty / tlen }
-}
-
-function rimInwardNormalWorld(
-  baseX: number,
-  baseY: number,
-  ux: number,
-  uy: number,
-  vx: number,
-  vy: number,
-  uParam: number,
-): { x: number; y: number } {
-  const e = 0.012
-  const p0 = rimPointWorld(baseX, baseY, ux, uy, vx, vy, Math.max(0, uParam - e))
-  const p1 = rimPointWorld(baseX, baseY, ux, uy, vx, vy, Math.min(1, uParam + e))
-  let tx = p1.x - p0.x
-  let ty = p1.y - p0.y
-  const tlen = Math.hypot(tx, ty) || 1
-  tx /= tlen
-  ty /= tlen
-  let nx = -ty
-  let ny = tx
-  const midX = baseX + ux * 40
-  const midY = baseY + uy * 40
-  if (nx * (midX - p0.x) + ny * (midY - p0.y) < 0) {
-    nx = -nx
-    ny = -ny
-  }
-  return { x: nx, y: ny }
-}
-
-export type FrondAttach = {
-  x: number
-  y: number
-  /** Unit tangent along rim (left → right). */
-  rimTx: number
-  rimTy: number
-}
-
-function frondAttach(
-  baseX: number,
-  baseY: number,
-  ux: number,
-  uy: number,
-  vx: number,
-  vy: number,
-  index: number,
-): FrondAttach {
-  const denom = Math.max(1, FROND_COUNT - 1)
-  const span = 1 - 2 * RIM_U_INSET
-  const u = RIM_U_INSET + span * (index / denom)
-  const p = rimPointWorld(baseX, baseY, ux, uy, vx, vy, u)
-  const n = rimInwardNormalWorld(baseX, baseY, ux, uy, vx, vy, u)
-  const t = rimTangentWorld(baseX, baseY, ux, uy, vx, vy, u)
-  return {
-    x: p.x + n.x * FROND_UNDERLAP,
-    y: p.y + n.y * FROND_UNDERLAP,
-    rimTx: t.x,
-    rimTy: t.y,
-  }
+function anchorAt(state: JellyfishState, index: number): Point {
+  const { across, forward } = basis(state)
+  const width = BELL_WIDTH
+  const acrossPosition = width * (-0.80 + 1.60 * index / (LENGTHS.length - 1))
+  return { x: state.x + across.x * acrossPosition + forward.x * 3,
+    y: state.y + across.y * acrossPosition + forward.y * 3 }
 }
 
 export function createJellyfishState(cursorX: number, cursorY: number): JellyfishState {
-  const fronds: Frond[] = []
-  const { ux, uy, vx, vy } = bellBasis(cursorX, cursorY, cursorX, cursorY + BELL_REST_LENGTH)
-  const downX = -ux
-  const downY = -uy
-  for (let i = 0; i < FROND_COUNT; i++) {
-    const a = frondAttach(cursorX, cursorY + BELL_REST_LENGTH, ux, uy, vx, vy, i)
-    fronds.push({
-      tipX: a.x + downX * FROND_LENGTH,
-      tipY: a.y + downY * FROND_LENGTH,
-      vx: 0,
-      vy: 0,
-      phase: i * 1.9,
-    })
+  const state: JellyfishState = {
+    x: cursorX, y: cursorY + BELL_HEIGHT,
+    apexX: cursorX, apexY: cursorY, time: 0,
+    apexVx: 0, apexVy: 0, baseVx: 0, baseVy: 0, smoothX: cursorX, smoothY: cursorY,
+    depth: 0, depthTarget: 0, revision: 0, fronds: [],
   }
-  return {
-    x: cursorX,
-    y: cursorY + BELL_REST_LENGTH,
-    baseVx: 0,
-    baseVy: 0,
-    apexX: cursorX,
-    apexY: cursorY,
-    apexVx: 0,
-    apexVy: 0,
-    fronds,
-    time: 0,
-    smoothX: cursorX,
-    smoothY: cursorY,
+  for (let i = 0; i < LENGTHS.length; i++) {
+    const anchor = anchorAt(state, i)
+    const length = LENGTHS[i]!
+    const { down } = basis(state)
+    state.fronds.push({ tipX: anchor.x + down.x * length, tipY: anchor.y + down.y * length,
+      vx: 0, vy: 0, bend: 0, bendVelocity: 0, length, width: WIDTHS[i]!, phase: i * 1.83 })
   }
+  return state
+}
+
+export function setJellyfishDepth(state: JellyfishState, below: boolean, immediate = false): void {
+  state.depthTarget = below ? 1 : 0
+  if (immediate) state.depth = state.depthTarget
+  state.revision++
 }
 
 function clampSpeed(vx: number, vy: number, max: number): { x: number; y: number } {
@@ -234,14 +89,8 @@ function waterAccel(vx: number, vy: number, kLinear: number, kQuad: number): { a
   return { ax: -vx * drag, ay: -vy * drag }
 }
 
-export function stepJellyfish(
-  state: JellyfishState,
-  targetX: number,
-  targetY: number,
-  dt: number,
-): void {
-  state.time += dt
-
+/** Original apex attraction and trailing-base motion, without pulse propulsion. */
+function stepFollowingBody(state: JellyfishState, targetX: number, targetY: number, dt: number): void {
   const smoothAlpha = 1 - Math.exp(-dt / SMOOTH_CURSOR_TAU)
   state.smoothX += (targetX - state.smoothX) * smoothAlpha
   state.smoothY += (targetY - state.smoothY) * smoothAlpha
@@ -310,380 +159,207 @@ export function stepJellyfish(
   state.apexVx = apexVx
   state.apexVy = apexVy
 
-  const { ux: bux, uy: buy, vx: bvx, vy: bvy } = bellBasis(state.apexX, state.apexY, state.x, state.y)
+}
 
-  const swayT = state.time * 0.42
-  const bodyDragX = baseVx * BODY_MOTION_INFLUENCE
-  const bodyDragY = baseVy * BODY_MOTION_INFLUENCE * 0.45
-
-  const downX = -bux
-  const downY = -buy
-
+function stepFronds(state: JellyfishState, dt: number): void {
+  const { across, down } = basis(state)
   for (let i = 0; i < state.fronds.length; i++) {
-    const f = state.fronds[i]!
-    const anchor = frondAttach(state.x, state.y, bux, buy, bvx, bvy, i)
-
-    const sway =
-      Math.sin(swayT + f.phase) * SWAY_AMP +
-      Math.sin(swayT * 0.62 + f.phase * 1.3) * (SWAY_AMP * 0.32)
-
-    const tx = anchor.x + downX * FROND_LENGTH + anchor.rimTx * sway + bodyDragX
-    const ty = anchor.y + downY * FROND_LENGTH + anchor.rimTy * sway * 0.12 + bodyDragY
-
-    const ex = tx - f.tipX
-    const ey = ty - f.tipY
-    const axSpring = ex * FROND_STIFFNESS - f.vx * FROND_DAMPING
-    const aySpring = ey * FROND_STIFFNESS - f.vy * FROND_DAMPING
-    f.vx += axSpring * dt
-    f.vy += aySpring * dt
-    f.tipX += f.vx * dt
-    f.tipY += f.vy * dt
-
-    const fdx = f.tipX - anchor.x
-    const fdy = f.tipY - anchor.y
-    const fdist = Math.hypot(fdx, fdy)
-    if (fdist > FROND_MAX_ANCHOR_DIST && fdist > 1e-6) {
-      const s = FROND_MAX_ANCHOR_DIST / fdist
-      f.tipX = anchor.x + fdx * s
-      f.tipY = anchor.y + fdy * s
-      const nx = fdx / fdist
-      const ny = fdy / fdist
-      const vrad = f.vx * nx + f.vy * ny
-      if (vrad > 0) {
-        f.vx -= nx * vrad
-        f.vy -= ny * vrad
-      }
+    const frond = state.fronds[i]!
+    const root = anchorAt(state, i)
+    const swayT = state.time * (0.74 + i * 0.035)
+    const sway = Math.sin(swayT + frond.phase) * 13 + Math.sin(swayT * 0.57 + frond.phase * 1.3) * 4.5
+    const targetX = root.x + down.x * frond.length + across.x * sway + state.baseVx * 0.14
+    const targetY = root.y + down.y * frond.length + across.y * sway + state.baseVy * 0.09
+    // Softer, underdamped tips keep a swish moving after the bell has changed direction.
+    frond.vx += ((targetX - frond.tipX) * 16 - frond.vx * 4.8) * dt
+    frond.vy += ((targetY - frond.tipY) * 16 - frond.vy * 4.8) * dt
+    frond.tipX += frond.vx * dt; frond.tipY += frond.vy * dt
+    const driftAcross = state.baseVx * across.x + state.baseVy * across.y
+    const bendTarget = Math.sin(swayT * 0.82 + frond.phase + 1.1) * 14 - driftAcross * 0.045
+    frond.bendVelocity += ((bendTarget - frond.bend) * 7 - frond.bendVelocity * 2.8) * dt
+    frond.bend += frond.bendVelocity * dt
+    if (Math.abs(frond.bend) > 26) { frond.bend = Math.sign(frond.bend) * 26; frond.bendVelocity *= 0.5 }
+    const dx = frond.tipX - root.x, dy = frond.tipY - root.y
+    const distance = Math.hypot(dx, dy)
+    const reach = frond.length + 18
+    if (distance > reach) {
+      frond.tipX = root.x + dx * reach / distance
+      frond.tipY = root.y + dy * reach / distance
+      const nx = dx / distance, ny = dy / distance
+      const radialVelocity = frond.vx * nx + frond.vy * ny
+      if (radialVelocity > 0) { frond.vx -= nx * radialVelocity; frond.vy -= ny * radialVelocity }
     }
   }
 }
 
-type FrondPoly = {
-  tl: { x: number; y: number }
-  tr: { x: number; y: number }
-  bl: { x: number; y: number }
-  br: { x: number; y: number }
-  midLx: number
-  midLy: number
-  midRx: number
-  midRy: number
-  tipX: number
-  tipY: number
-  bulge: number
+export function stepJellyfish(state: JellyfishState, targetX: number, targetY: number, dt: number, swimSpeed = 1): void {
+  if (dt <= 0 || !Number.isFinite(dt)) return
+  const elapsed = Math.min(dt, 0.125)
+  state.depth += (state.depthTarget - state.depth) * (1 - Math.exp(-elapsed / 0.16))
+  if (Math.abs(state.depthTarget - state.depth) < 0.001) state.depth = state.depthTarget
+  const motionTime = Math.min(elapsed * Math.max(0.25, Math.min(2.5, swimSpeed)), 0.125)
+  stepFollowingBody(state, targetX, targetY, motionTime)
+  const count = Math.ceil(motionTime / (1 / 120))
+  const h = motionTime / count
+  for (let i = 0; i < count; i++) {
+    state.time += h
+    stepFronds(state, h)
+  }
+  state.revision++
 }
 
-function getFrondPoly(
-  ax: number,
-  ay: number,
-  tipX: number,
-  tipY: number,
-  rimTx: number,
-  rimTy: number,
-  downX: number,
-  downY: number,
-): FrondPoly | null {
-  const len = Math.hypot(tipX - ax, tipY - ay)
-  if (len < 4) return null
-  const px = rimTx
-  const py = rimTy
-  const ux = downX
-  const uy = downY
-  const wt = FROND_TOP_W * 0.5
-  const wb = FROND_BOT_W * 0.5
-  const bulge = Math.min(6.5, len * 0.13)
-  const tlX = ax + px * wt
-  const tlY = ay + py * wt
-  const trX = ax - px * wt
-  const trY = ay - py * wt
-  const blX = tipX + px * wb
-  const blY = tipY + py * wb
-  const brX = tipX - px * wb
-  const brY = tipY - py * wb
-  const midLx = (tlX + blX) * 0.5 + ux * len * 0.08
-  const midLy = (tlY + blY) * 0.5 + uy * len * 0.08
-  const midRx = (trX + brX) * 0.5 + ux * len * 0.08
-  const midRy = (trY + brY) * 0.5 + uy * len * 0.08
+function cubic(a: Point, b: Point, c: Point, d: Point, t: number): Point {
+  const u = 1 - t
+  return { x: u ** 3 * a.x + 3 * u * u * t * b.x + 3 * u * t * t * c.x + t ** 3 * d.x,
+    y: u ** 3 * a.y + 3 * u * u * t * b.y + 3 * u * t * t * c.y + t ** 3 * d.y }
+}
+
+function bellOutline(width: number, height: number): Point[] {
+  const points: Point[] = []
+  const left = { x: -width, y: 0 }, top = { x: 0, y: -height }, right = { x: width, y: 0 }
+  for (let i = 0; i <= 24; i++) points.push(cubic(left,
+    { x: -width, y: -height * 0.60 }, { x: -width * 0.50, y: -height }, top, i / 24))
+  for (let i = 1; i <= 24; i++) points.push(cubic(top,
+    { x: width * 0.50, y: -height }, { x: width, y: -height * 0.60 }, right, i / 24))
+  for (let i = 1; i <= 12; i++) {
+    const t = i / 12
+    points.push({ x: width * (1 - 2 * t), y: -16 * t * (1 - t) })
+  }
+  return points
+}
+
+function tentacleOutline(state: JellyfishState, frond: Frond, index: number): Point[] {
+  const root = anchorAt(state, index)
+  const tip = { x: frond.tipX, y: frond.tipY }
+  const { across, down } = basis(state)
+  // The delayed bend carries water flow through each ribbon, independently of its tip.
+  const c1 = { x: root.x + down.x * frond.length * 0.36 + across.x * frond.bend * 0.55,
+    y: root.y + down.y * frond.length * 0.36 + across.y * frond.bend * 0.55 }
+  const c2 = { x: tip.x - down.x * frond.length * 0.30 - across.x * frond.bend * 0.8,
+    y: tip.y - down.y * frond.length * 0.30 - across.y * frond.bend * 0.8 }
+  const center = Array.from({ length: 33 }, (_, j) => cubic(root, c1, c2, tip, j / 32))
+  const left: Point[] = [], right: Point[] = []
+  for (let j = 0; j < center.length; j++) {
+    const a = center[Math.max(0, j - 1)]!, b = center[Math.min(center.length - 1, j + 1)]!
+    const length = Math.hypot(b.x - a.x, b.y - a.y) || 1
+    const width = frond.width * (1 - j / (center.length - 1)) ** 0.65 * 0.5 + 0.25
+    const nx = -(b.y - a.y) / length, ny = (b.x - a.x) / length
+    const point = center[j]!
+    left.push({ x: point.x + nx * width, y: point.y + ny * width })
+    right.push({ x: point.x - nx * width, y: point.y - ny * width })
+  }
+  return [...left, ...right.reverse()]
+}
+
+function computeJellyfishGeometry(state: JellyfishState, scale: number) {
+  const { across, down } = basis(state)
+  const bell = getBellGeometry()
+  const effectiveScale = scale * (1 - state.depth * 0.18)
+  const depthOffset = state.depth * 22 * scale
+  const worldPoint = (point: Point): Point => ({
+    x: state.x + (point.x - state.x) * effectiveScale,
+    y: state.y + (point.y - state.y) * effectiveScale + depthOffset,
+  })
+  const localBell = bellOutline(bell.width, bell.height)
+  const bellPoints = localBell.map(point => worldPoint({
+    x: state.x + across.x * point.x + down.x * point.y,
+    y: state.y + across.y * point.x + down.y * point.y,
+  }))
   return {
-    tl: { x: tlX, y: tlY },
-    tr: { x: trX, y: trY },
-    bl: { x: blX, y: blY },
-    br: { x: brX, y: brY },
-    midLx,
-    midLy,
-    midRx,
-    midRy,
-    tipX,
-    tipY,
-    bulge,
+    ...bell, localBell, bell: bellPoints, origin: worldPoint({ x: state.x, y: state.y }),
+    tentacles: state.fronds.map((frond, i) => tentacleOutline(state, frond, i).map(worldPoint)),
+    across, down, effectiveScale, depthOffset,
+    opacity: 1 - state.depth * 0.74,
   }
 }
 
-function frondBlockedIntervalForBand(
-  p: FrondPoly,
-  bandTop: number,
-  bandBottom: number,
-): Interval | null {
-  const padY = 3
-  const yMin =
-    Math.min(p.tl.y, p.tr.y, p.bl.y, p.br.y, p.midLy, p.midRy, p.tipY, p.tipY + p.bulge) - padY
-  const yMax =
-    Math.max(p.tl.y, p.tr.y, p.bl.y, p.br.y, p.midLy, p.midRy, p.tipY, p.tipY + p.bulge) + padY
-  if (bandBottom < yMin || bandTop > yMax) return null
+type JellyfishGeometry = ReturnType<typeof computeJellyfishGeometry>
+const geometryCache = new WeakMap<JellyfishState, { revision: number; scale: number; geometry: JellyfishGeometry }>()
 
-  const xMin = Math.min(p.tl.x, p.tr.x, p.bl.x, p.br.x, p.midLx, p.midRx, p.tipX)
-  const xMax = Math.max(p.tl.x, p.tr.x, p.bl.x, p.br.x, p.midLx, p.midRx, p.tipX)
-  return {
-    left: xMin - FROND_LAYOUT_PAD_X,
-    right: xMax + FROND_LAYOUT_PAD_X,
-  }
+/** One outline calculation per pose is shared by all text lines and the renderer. */
+export function getJellyfishGeometry(state: JellyfishState, scale = 1): JellyfishGeometry {
+  const cached = geometryCache.get(state)
+  if (cached?.revision === state.revision && cached.scale === scale) return cached.geometry
+  const geometry = computeJellyfishGeometry(state, scale)
+  geometryCache.set(state, { revision: state.revision, scale, geometry })
+  return geometry
 }
 
-function drawPearFrondFill(
-  ctx: CanvasRenderingContext2D,
-  ax: number,
-  ay: number,
-  tipX: number,
-  tipY: number,
-  rimTx: number,
-  rimTy: number,
-  downX: number,
-  downY: number,
-  upX: number,
-  upY: number,
-  fillStyle: string,
-): void {
-  const p = getFrondPoly(ax, ay, tipX, tipY, rimTx, rimTy, downX, downY)
-  if (p === null) return
-
+function path(ctx: CanvasRenderingContext2D, points: readonly Point[]): void {
   ctx.beginPath()
-  ctx.moveTo(p.tl.x, p.tl.y)
-  ctx.quadraticCurveTo(p.midLx, p.midLy, p.bl.x, p.bl.y)
-  ctx.quadraticCurveTo(p.tipX, p.tipY + p.bulge, p.br.x, p.br.y)
-  ctx.quadraticCurveTo(p.midRx, p.midRy, p.tr.x, p.tr.y)
-  const capX = (p.tl.x + p.tr.x) * 0.5 + upX * 1.0
-  const capY = (p.tl.y + p.tr.y) * 0.5 + upY * 1.0
-  ctx.quadraticCurveTo(capX, capY, p.tl.x, p.tl.y)
+  ctx.moveTo(points[0]!.x, points[0]!.y)
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i]!.x, points[i]!.y)
   ctx.closePath()
-
-  ctx.fillStyle = fillStyle
-  ctx.fill()
 }
 
-function bellArcParams(
-  baseX: number,
-  baseY: number,
-  apexX: number,
-  apexY: number,
-): {
-  pL: { x: number; y: number }
-  pR: { x: number; y: number }
-  mx: number
-  my: number
-  r: number
-  angL: number
-  angR: number
-  anticlockwise: boolean
-} {
-  const { ux, uy, vx, vy } = bellBasis(apexX, apexY, baseX, baseY)
-  const pL = rimPointWorld(baseX, baseY, ux, uy, vx, vy, 0)
-  const pR = rimPointWorld(baseX, baseY, ux, uy, vx, vy, 1)
-  const mx = (pL.x + pR.x) * 0.5
-  const my = (pL.y + pR.y) * 0.5
-  const r = BELL_RX
-  const angL = Math.atan2(pL.y - my, pL.x - mx)
-  const angR = Math.atan2(pR.y - my, pR.x - mx)
-  const rx = pR.x - pL.x
-  const ry = pR.y - pL.y
-  const ax = apexX - mx
-  const ay = apexY - my
-  const cross = rx * ay - ry * ax
-  const anticlockwise = cross > 0
-  return { pL, pR, mx, my, r, angL, angR, anticlockwise }
-}
-
-/** Closed bell path for fill (dome + oral diameter). */
-function drawBellBodyFill(
-  ctx: CanvasRenderingContext2D,
-  baseX: number,
-  baseY: number,
-  apexX: number,
-  apexY: number,
-  fillStyle: string,
-): void {
-  const { pL, mx, my, r, angL, angR, anticlockwise } = bellArcParams(baseX, baseY, apexX, apexY)
-
-  ctx.beginPath()
-  ctx.moveTo(pL.x, pL.y)
-  ctx.arc(mx, my, r, angL, angR, anticlockwise)
-  ctx.lineTo(pL.x, pL.y)
-  ctx.closePath()
-
-  ctx.fillStyle = fillStyle
-  ctx.fill()
-}
-
-/**
- * Outer stroke as two open subpaths so we do not draw along the oral rim over the
- * end fronds (that read as a seam between bell and tendrils).
- * 1) Dome arc pL → pR only.
- * 2) Outer frond loop from tr (right) down around tips and up to tl (left), no tl → pL.
- */
-function appendJellyfishOutlinePath(
-  ctx: CanvasRenderingContext2D,
-  baseX: number,
-  baseY: number,
-  apexX: number,
-  apexY: number,
-  fronds: Frond[],
-  ux: number,
-  uy: number,
-  vx: number,
-  vy: number,
-  downX: number,
-  downY: number,
-): void {
-  const { pL, mx, my, r, angL, angR, anticlockwise } = bellArcParams(baseX, baseY, apexX, apexY)
-  const n = fronds.length
-
-  const polys: (FrondPoly | null)[] = []
-  for (let i = 0; i < n; i++) {
-    const f = fronds[i]!
-    const anchor = frondAttach(baseX, baseY, ux, uy, vx, vy, i)
-    polys.push(
-      getFrondPoly(anchor.x, anchor.y, f.tipX, f.tipY, anchor.rimTx, anchor.rimTy, downX, downY),
-    )
-  }
-
-  if (n === 0 || polys.some(p => p === null)) {
-    ctx.moveTo(pL.x, pL.y)
-    ctx.arc(mx, my, r, angL, angR, anticlockwise)
-    ctx.lineTo(pL.x, pL.y)
-    ctx.closePath()
-    return
-  }
-
-  ctx.moveTo(pL.x, pL.y)
-  ctx.arc(mx, my, r, angL, angR, anticlockwise)
-
-  const last = polys[n - 1]!
-  ctx.moveTo(last.tr.x, last.tr.y)
-  ctx.quadraticCurveTo(last.midRx, last.midRy, last.br.x, last.br.y)
-
-  for (let i = n - 1; i >= 1; i--) {
-    const pi = polys[i]!
-    const prev = polys[i - 1]!
-    ctx.quadraticCurveTo(pi.tipX, pi.tipY + pi.bulge, pi.bl.x, pi.bl.y)
-    ctx.lineTo(prev.br.x, prev.br.y)
-  }
-
-  const p0 = polys[0]!
-  ctx.quadraticCurveTo(p0.tipX, p0.tipY + p0.bulge, p0.bl.x, p0.bl.y)
-  ctx.quadraticCurveTo(p0.midLx, p0.midLy, p0.tl.x, p0.tl.y)
-}
-
-export function drawJellyfish(
-  ctx: CanvasRenderingContext2D,
-  state: JellyfishState,
-  options?: { underwater?: boolean },
-): void {
-  const { ux, uy, vx, vy } = bellBasis(state.apexX, state.apexY, state.x, state.y)
-  const downX = -ux
-  const downY = -uy
-
-  const uw = options?.underwater === true
-  const fillStyle = uw ? FILL_UNDERWATER : FILL
-  const strokeStyle = uw ? STROKE_UNDERWATER : STROKE
-
+export function drawJellyfish(ctx: CanvasRenderingContext2D, state: JellyfishState, options?: { scale?: number }): void {
+  const geometry = getJellyfishGeometry(state, options?.scale ?? 1)
   ctx.save()
-  if (uw) {
-    ctx.globalAlpha = 0.9
+  ctx.globalAlpha = geometry.opacity
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round'
+  for (const outline of geometry.tentacles) {
+    path(ctx, outline)
+    ctx.fillStyle = 'rgba(152, 220, 203, 0.23)'; ctx.fill()
+    ctx.strokeStyle = 'rgba(152, 220, 203, 0.40)'; ctx.lineWidth = 0.7; ctx.stroke()
   }
-
-  for (let i = 0; i < state.fronds.length; i++) {
-    const f = state.fronds[i]!
-    const anchor = frondAttach(state.x, state.y, ux, uy, vx, vy, i)
-    drawPearFrondFill(
-      ctx,
-      anchor.x,
-      anchor.y,
-      f.tipX,
-      f.tipY,
-      anchor.rimTx,
-      anchor.rimTy,
-      downX,
-      downY,
-      ux,
-      uy,
-      fillStyle,
-    )
+  ctx.translate(geometry.origin.x, geometry.origin.y)
+  ctx.scale(geometry.effectiveScale, geometry.effectiveScale)
+  ctx.transform(geometry.across.x, geometry.across.y, geometry.down.x, geometry.down.y, 0, 0)
+  const { width, height } = geometry
+  const glow = ctx.createRadialGradient(0, -height * 0.48, 8, 0, -height * 0.48, 92)
+  glow.addColorStop(0, 'rgba(152, 220, 203, 0.10)')
+  glow.addColorStop(1, 'rgba(152, 220, 203, 0)')
+  ctx.fillStyle = glow; ctx.fillRect(-96, -height - 52, 192, 192)
+  const fill = ctx.createLinearGradient(0, -height, 0, 5)
+  fill.addColorStop(0, 'rgba(221, 216, 248, 0.78)')
+  fill.addColorStop(0.45, 'rgba(174, 211, 223, 0.40)')
+  fill.addColorStop(1, 'rgba(152, 220, 203, 0.18)')
+  path(ctx, geometry.localBell)
+  ctx.fillStyle = fill; ctx.fill()
+  ctx.strokeStyle = 'rgba(221, 237, 231, 0.66)'; ctx.lineWidth = 1.1; ctx.stroke()
+  ctx.strokeStyle = 'rgba(221, 237, 231, 0.20)'; ctx.lineWidth = 0.75
+  for (const u of [-0.52, 0, 0.52]) {
+    ctx.beginPath(); ctx.moveTo(0, -height * 0.94)
+    ctx.quadraticCurveTo(u * width * 1.15, -height * 0.59, u * width, -5); ctx.stroke()
   }
-
-  drawBellBodyFill(ctx, state.x, state.y, state.apexX, state.apexY, fillStyle)
-
-  ctx.beginPath()
-  appendJellyfishOutlinePath(
-    ctx,
-    state.x,
-    state.y,
-    state.apexX,
-    state.apexY,
-    state.fronds,
-    ux,
-    uy,
-    vx,
-    vy,
-    downX,
-    downY,
-  )
-  ctx.strokeStyle = strokeStyle
-  ctx.lineWidth = STROKE_W
-  ctx.lineJoin = 'round'
-  ctx.lineCap = 'round'
-  ctx.stroke()
-
+  ctx.beginPath(); ctx.moveTo(-width * 0.88, -4)
+  ctx.quadraticCurveTo(0, -13, width * 0.88, -4)
+  ctx.strokeStyle = 'rgba(152, 220, 203, 0.78)'; ctx.lineWidth = 1.6; ctx.stroke()
   ctx.restore()
 }
 
-export function layoutObstacleFromState(state: JellyfishState): { cx: number; cy: number; r: number } {
-  const cx = (state.x + state.apexX) * 0.5
-  const cy = (state.y + state.apexY) * 0.5
-  return { cx, cy, r: BODY_RADIUS_LAYOUT }
+export function layoutObstacleFromState(state: JellyfishState, scale = 1) {
+  const geometry = getJellyfishGeometry(state, scale)
+  return {
+    cx: geometry.origin.x - geometry.down.x * geometry.height * 0.5 * geometry.effectiveScale,
+    cy: geometry.origin.y - geometry.down.y * geometry.height * 0.5 * geometry.effectiveScale,
+    r: (geometry.width + 6) * geometry.effectiveScale,
+  }
 }
 
-/**
- * Horizontal blocked intervals for one text line band: bell (layout circle) plus each frond’s
- * footprint, merged so wrap carving sees a single obstacle region when shapes overlap.
- */
-export function blockedIntervalsForLayout(
-  state: JellyfishState,
-  bandTop: number,
-  bandBottom: number,
-): Interval[] {
-  const { cx, cy, r } = layoutObstacleFromState(state)
-  const parts: Interval[] = []
-  const bell = circleBlockedIntervalForBand(cx, cy, r, bandTop, bandBottom)
-  if (bell) parts.push(bell)
-
-  const { ux, uy, vx, vy } = bellBasis(state.apexX, state.apexY, state.x, state.y)
-  const downX = -ux
-  const downY = -uy
-
-  for (let i = 0; i < state.fronds.length; i++) {
-    const f = state.fronds[i]!
-    const anchor = frondAttach(state.x, state.y, ux, uy, vx, vy, i)
-    const poly = getFrondPoly(
-      anchor.x,
-      anchor.y,
-      f.tipX,
-      f.tipY,
-      anchor.rimTx,
-      anchor.rimTy,
-      downX,
-      downY,
-    )
-    if (poly === null) continue
-    const fr = frondBlockedIntervalForBand(poly, bandTop, bandBottom)
-    if (fr) parts.push(fr)
+function polygonInterval(points: readonly Point[], top: number, bottom: number, pad: number): Interval | null {
+  let left = Infinity, right = -Infinity
+  const bandTop = top - pad, bandBottom = bottom + pad
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i]!, b = points[(i + 1) % points.length]!
+    if (a.y >= bandTop && a.y <= bandBottom) { left = Math.min(left, a.x); right = Math.max(right, a.x) }
+    for (const y of [bandTop, bandBottom]) {
+      if ((a.y <= y && b.y >= y || b.y <= y && a.y >= y) && Math.abs(b.y - a.y) > 1e-8) {
+        const x = a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y)
+        left = Math.min(left, x); right = Math.max(right, x)
+      }
+    }
   }
+  return Number.isFinite(left) ? { left: left - pad, right: right + pad } : null
+}
 
+export function blockedIntervalsForLayout(state: JellyfishState, top: number, bottom: number, scale = 1): Interval[] {
+  if (state.depth >= 0.72) return []
+  const geometry = getJellyfishGeometry(state, scale)
+  const parts: Interval[] = []
+  for (const outline of [geometry.bell, ...geometry.tentacles]) {
+    const interval = polygonInterval(outline, top, bottom, 3 + scale * 2)
+    if (interval) parts.push(interval)
+  }
   return mergeIntervals(parts)
 }

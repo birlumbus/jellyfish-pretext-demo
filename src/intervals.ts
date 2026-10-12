@@ -24,7 +24,7 @@ export function circleBlockedIntervalForBand(
 }
 
 /** Subtract blocked intervals from a full-width band; drop slivers narrower than the minimum line width. */
-export function carveTextLineSlots(base: Interval, blocked: Interval[]): Interval[] {
+export function carveTextLineSlots(base: Interval, blocked: Interval[], minimumWidth = 24): Interval[] {
   let slots: Interval[] = [base]
 
   for (let blockedIndex = 0; blockedIndex < blocked.length; blockedIndex++) {
@@ -42,7 +42,7 @@ export function carveTextLineSlots(base: Interval, blocked: Interval[]): Interva
     slots = next
   }
 
-  return slots.filter(slot => slot.right - slot.left >= 24)
+  return slots.filter(slot => slot.right - slot.left >= minimumWidth)
 }
 
 /** Merge overlapping / touching intervals (for multiple obstacles per band). */
